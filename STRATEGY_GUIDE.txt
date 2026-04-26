@@ -1,0 +1,777 @@
+STRATEGY GUIDE
+================
+
+Purpose
+-------
+This guide explains how to create new Python strategy modules that plug into the strategy-loader backtester system.
+
+It is written for:
+- human developers
+- AI coding agents
+- future maintainers of the project
+
+The goal is simple:
+1. Put a strategy file in the correct folder.
+2. Define the required strategy class and metadata.
+3. Request the indicators you need.
+4. Implement entry/exit logic in the expected format.
+5. Let the engine handle execution, state management, commissions, sizing, and reporting.
+
+
+1) How the Strategy Plugin System Works
+---------------------------------------
+
+The project uses a plugin architecture for strategies.
+
+Core idea:
+- strategy logic lives in separate Python modules
+- the loader discovers available strategy files automatically
+- the frontend requests the list of available strategies from the backend
+- when the user selects a strategy in the Backtest tab, the frontend loads that strategy's metadata + parameter schema
+- the frontend builds the parameter editor automatically
+- the engine executes the selected strategy bar-by-bar
+
+Main folders
+------------
+Expected backend layout:
+
+backend/
+  strategy_loader.py
+  strategy_api.py
+  engine_core.py
+  strategies/
+    __init__.py
+    base.py
+    ema_hma_trend.py
+    breakout_retest.py
+    your_new_strategy.py
+
+Important locations:
+- backend/strategies/ = all strategy plugins live here
+- backend/strategies/base.py = shared base class / required interface
+- backend/strategy_loader.py = discovers and loads strategy classes
+- backend/strategy_api.py = API endpoints for listing strategies and running them
+- backend/engine_core.py = reusable backtest engine
+
+How discovery works
+-------------------
+The loader scans backend/strategies/ for Python modules.
+It skips files such as:
+- base.py
+- __init__.py
+- private files starting with underscore
+
+Each valid module is imported.
+The loader searches the module for classes that inherit from BaseStrategy.
+Those classes are instantiated and registered by strategy_id.
+
+How a strategy is selected from the frontend
+--------------------------------------------
+Typical flow:
+1. Frontend calls GET /api/strategies
+2. Backend returns available strategies (id, name, description, metadata)
+3. User chooses a strategy in Load Strategy Mode
+4. Frontend calls GET /api/strategy/<id>
+5. Backend returns full metadata + parameter schema + engine schema/defaults
+6. Frontend auto-renders the parameter editor
+7. User clicks Run Backtest
+8. Frontend sends POST /api/backtest/run with:
+   - strategy_id
+   - strategy parameters
+   - engine settings
+   - dataset config
+   - capital / commission config
+9. Backend loads bars, precomputes indicators, runs the engine, and returns results
+
+
+2) Strategy File Structure
+--------------------------
+
+Where to put the file
+---------------------
+Create the strategy as a separate Python file inside:
+
+backend/strategies/
+
+Example:
+backend/strategies/my_strategy.py
+
+Required imports
+----------------
+At minimum, import the base strategy class:
+
+from backend.strategies.base import BaseStrategy
+
+You may also import:
+- typing helpers
+- math
+- any safe standard-library utilities
+
+Avoid importing heavy frameworks unless truly necessary.
+
+Class naming convention
+-----------------------
+Use a clear class name that ends with Strategy.
+Examples:
+- MyStrategy
+- EmaHmaTrendStrategy
+- BreakoutRetestStrategy
+
+The file name does not have to exactly match the class name, but keeping them aligned is strongly recommended.
+
+Recommended file pattern
+------------------------
+Example:
+
+backend/strategies/my_strategy.py
+
+class MyStrategy(BaseStrategy):
+    strategy_id = "my_strategy"
+    name = "My Strategy"
+    description = "Short description"
+    parameters = {...}
+    indicators_required = [...]
+
+    def on_bar(self, i, bar, indicators, state, position, bars, params):
+        ...
+        return {}
+
+How a strategy is registered
+----------------------------
+You do NOT manually register the strategy in a central list.
+The loader discovers it automatically if:
+- the file is in backend/strategies/
+- the module imports successfully
+- the class inherits from BaseStrategy
+- the class defines a valid strategy_id
+
+
+3) Required Strategy Interface / Methods
+----------------------------------------
+
+Every strategy must inherit from BaseStrategy.
+
+Required class attributes
+-------------------------
+These are expected on the strategy class:
+
+1. strategy_id
+   Unique machine-friendly ID.
+   Example:
+   strategy_id = "ema_hma_trend"
+
+2. name
+   Human-friendly display name.
+   Example:
+   name = "EMA + HMA Trend Pullback"
+
+3. description
+   Plain English summary shown in the frontend.
+
+4. parameters
+   Parameter schema used by the frontend to auto-build the editor.
+
+5. indicators_required
+   List describing which indicators must be precomputed before the engine runs.
+
+Main required method
+--------------------
+The key method is:
+
+on_bar(self, i, bar, indicators, state, position, bars, params)
+
+This method is called sequentially for each bar.
+
+Expected parameters:
+- i
+  Current bar index (integer)
+
+- bar
+  Current bar dictionary
+
+- indicators
+  Dictionary containing:
+  - current = current indicator values for this bar
+  - series = full precomputed arrays for each requested indicator
+
+- state
+  Mutable strategy/engine state dictionary
+  Use this carefully for tracking custom state between bars
+
+- position
+  Current open position view, or None if flat
+  This is a read-only view intended for strategy logic decisions
+
+- bars
+  Full bar list (historical + current)
+  Never use future bars beyond index i
+
+- params
+  Validated strategy parameters after defaults/min/max/type processing
+
+Return value
+------------
+on_bar should return a dictionary describing an action, or an empty dictionary if no action is needed.
+
+Typical return keys:
+- enter
+- entry_price
+- stop_loss
+- take_profit
+- entry_reason
+- exit
+- exit_price
+- exit_reason
+
+Allowed action examples are documented later in this guide.
+
+Optional methods
+----------------
+Depending on your BaseStrategy implementation, the following hooks may also exist:
+
+- validate_parameters(...)
+  Usually inherited from BaseStrategy
+  Validates and merges defaults
+
+- build_indicators_required(params)
+  Usually inherited from BaseStrategy
+  Resolves dynamic indicator periods from parameter references
+
+- engine_parameter_overrides(params)
+  Optional hook that lets a strategy suggest engine defaults
+  Example uses:
+  - enable trailing by MA
+  - default fixed-R take profit
+  - default stacking behavior
+
+If your base class supports engine_parameter_overrides, only use it to suggest defaults.
+Do not try to bypass the engine.
+
+
+4) Available Data Fields Per Bar
+--------------------------------
+
+Each bar passed into the strategy is a dictionary.
+Expected bar fields:
+
+- time
+  Numeric timestamp
+  Usually epoch seconds (or normalized server timestamp)
+
+- open
+  Open price
+
+- high
+  High price
+
+- low
+  Low price
+
+- close
+  Close price
+
+- volume
+  Volume value if available
+
+Possible internal field:
+- index
+  The engine may internally add the current bar index when running.
+  Do not rely on this unless your current engine explicitly provides it.
+
+Example bar
+-----------
+{
+  "time": 1712345678,
+  "open": 18345.25,
+  "high": 18348.75,
+  "low": 18344.50,
+  "close": 18347.00,
+  "volume": 120.0
+}
+
+Best practice
+-------------
+Use the current bar only through:
+- bar["open"]
+- bar["high"]
+- bar["low"]
+- bar["close"]
+- bar["volume"]
+
+When using bars history, only access:
+- bars[:i+1]
+- bars[i]
+- bars[i-1]
+- bars[max(0, i-lookback):i+1]
+
+Never read bars after i.
+
+
+5) Available Indicators + How to Request Them
+---------------------------------------------
+
+Supported indicators
+--------------------
+The engine may support these indicator kinds (depending on your current engine implementation):
+
+- SMA
+- EMA
+- WMA
+- HMA
+- VWAP
+- CHOPPINESS
+- HIGHEST_HIGH
+- LOWEST_LOW
+
+How to request indicators
+-------------------------
+Use indicators_required on the strategy class.
+
+Example:
+indicators_required = [
+    {"key": "fast_ema", "kind": "EMA", "source": "close", "period_param": "fast_ema"},
+    {"key": "trend_hma", "kind": "HMA", "source": "close", "period_param": "trend_hma"},
+]
+
+Fields
+------
+- key
+  Name used inside the strategy to read the indicator
+
+- kind
+  Indicator type, for example EMA or HMA
+
+- source
+  Which bar field to use, usually one of:
+  - close
+  - open
+  - high
+  - low
+
+- period
+  Fixed lookback period
+
+- period_param
+  Name of a strategy parameter whose value becomes the period
+
+Fixed-period example
+--------------------
+indicators_required = [
+    {"key": "vwap", "kind": "VWAP", "source": "close"},
+    {"key": "slow_sma", "kind": "SMA", "source": "close", "period": 200},
+]
+
+How to read indicators in on_bar
+--------------------------------
+Current values:
+
+fast = indicators["current"].get("fast_ema")
+trend = indicators["current"].get("trend_hma")
+
+Full series:
+
+fast_series = indicators["series"]["fast_ema"]
+prev_fast = fast_series[i - 1] if i > 0 else None
+
+Best practice
+-------------
+Always guard against None values.
+Indicator arrays often contain None until enough historical bars exist.
+
+Example:
+if fast is None or trend is None:
+    return {}
+
+
+6) Trade Engine Constraints (IMPORTANT)
+---------------------------------------
+
+These rules matter. If you ignore them, your strategy will produce wrong or unstable results.
+
+Single position by default
+--------------------------
+The engine assumes one open position by default.
+Do not assume you can open multiple independent positions unless the engine + strategy explicitly allow stacking or pyramiding.
+
+Bar-by-bar sequential execution
+-------------------------------
+The engine runs in order, one bar at a time.
+The strategy should behave like this:
+- observe current bar and past data only
+- make a decision
+- engine handles the resulting order/action according to execution rules
+
+Do not write strategy logic that depends on future candles.
+
+Bar-close decision model
+------------------------
+Most strategies should treat the signal as being decided on the current bar close.
+Be consistent.
+If your engine is configured for bar-close logic, do not simulate intrabar hindsight.
+
+Entry timing
+------------
+Use the project convention that is currently implemented.
+Many systems signal on one bar and execute on the next bar open.
+Some simplified versions may enter at the current close.
+
+Important:
+When writing a new strategy, check the current engine behavior and follow it consistently.
+Do not mix entry-at-close and entry-at-next-open assumptions inside the same project.
+
+Exits
+-----
+The engine may support universal exit management, such as:
+- fixed SL points
+- fixed TP points
+- fixed R take profit
+- last-bar low/high stop
+- trailing stop by points
+- trailing stop by MA
+- break-even after +X R
+- partial take profit
+- scaling out at R levels
+
+A strategy may:
+- provide explicit stop_loss / take_profit in the returned action
+- or rely on engine-level exit configuration
+
+Commission handling
+-------------------
+The engine handles commission.
+Typical supported models:
+- flat per trade
+- per side
+- per contract
+
+Do not manually subtract commission inside the strategy.
+
+Position sizing
+---------------
+The engine may support:
+- fixed lot size
+- percent risk sizing based on stop distance and account balance
+
+Do not calculate final PnL inside the strategy.
+That is the engine's job.
+
+R-multiple calculation
+----------------------
+R is usually based on the initial stop distance.
+Typical formula:
+
+For long:
+R = (exit_price - entry_price) / (entry_price - stop_loss)
+
+For short:
+R = (entry_price - exit_price) / (stop_loss - entry_price)
+
+If the engine already computes R internally, do not override it in strategy logic.
+
+Scaling rules
+-------------
+If scaling in/out is enabled at the engine level:
+- treat trade slices carefully
+- the engine may output multiple trade records for a single position group
+- do not assume one entry equals one final exit record
+
+
+7) Strategy Output / Actions
+----------------------------
+
+A strategy should return a dictionary.
+If nothing should happen, return:
+
+{}
+
+Common action keys
+------------------
+
+Enter long
+----------
+{
+  "enter": "long",
+  "entry_price": bar["close"],
+  "stop_loss": 18340.0,
+  "take_profit": 18360.0,
+  "entry_reason": "ema_reclaim"
+}
+
+Enter short
+-----------
+{
+  "enter": "short",
+  "entry_price": bar["close"],
+  "stop_loss": 18355.0,
+  "take_profit": 18330.0,
+  "entry_reason": "breakdown"
+}
+
+Close existing trade
+--------------------
+{
+  "exit": True,
+  "exit_price": bar["close"],
+  "exit_reason": "trend_invalidated"
+}
+
+Minimal exit signal
+-------------------
+If the engine is allowed to use the current close by default:
+
+{
+  "exit": True,
+  "exit_reason": "signal_exit"
+}
+
+Notes
+-----
+- enter should be either "long" or "short"
+- exit should be True
+- entry_price / exit_price should be numeric if supplied
+- stop_loss / take_profit should be numeric or omitted
+- entry_reason / exit_reason should be plain strings for auditability
+
+Trailing / break-even / scaling from strategy
+---------------------------------------------
+If your engine supports custom runtime overrides, use the supported project pattern.
+If not, do NOT invent custom keys.
+Only return keys the engine understands.
+
+Best practice:
+- let engine settings handle trailing / break-even / partials
+- keep strategy output focused on directional logic + optional SL/TP hints
+
+
+8) What Is NOT Allowed / Common Mistakes
+----------------------------------------
+
+1. Repainting / using future bars
+---------------------------------
+Wrong:
+future_close = bars[i + 1]["close"]
+
+This invalidates backtest results.
+
+2. Ignoring None indicator values
+---------------------------------
+Indicators usually return None before enough history exists.
+Always guard against missing values.
+
+3. Conflicting signals on the same bar
+--------------------------------------
+Do not return both:
+- enter long
+- enter short
+
+Do not return both enter and exit for different intentions unless your engine explicitly supports that exact behavior.
+
+4. Modifying global state unsafely
+----------------------------------
+Avoid module-level mutable variables.
+Use the provided state object if you need per-run memory.
+
+Bad:
+last_signal = "long"   # global module variable
+
+Better:
+state.setdefault("my_strategy", {})
+state["my_strategy"]["last_signal"] = "long"
+
+5. Assuming position is always present
+--------------------------------------
+When flat, position may be None.
+Always check first.
+
+6. Assuming position is a custom object if current engine passes a dict
+-----------------------------------------------------------------------
+Use the current documented project format consistently.
+If the engine passes a dict-like position view, read it as a dict.
+
+7. Wrong bar index for lookbacks
+--------------------------------
+Be careful with ranges.
+Example safe pattern:
+start = max(0, i - lookback + 1)
+window = bars[start:i+1]
+
+8. Writing strategy-level PnL accounting
+----------------------------------------
+Do not update balance, commission, or account equity inside the strategy.
+That belongs to the engine.
+
+9. Returning unsupported keys
+-----------------------------
+Do not invent random action keys unless the engine explicitly supports them.
+Stick to documented action fields.
+
+10. Forgetting unique strategy_id
+---------------------------------
+If two strategies use the same strategy_id, loader registration will fail or become ambiguous.
+
+
+9) Example Strategy Template
+----------------------------
+
+Below is a complete minimal example.
+It requests indicators, defines parameters, enters trades, and exits trades.
+
+Example file: backend/strategies/example_cross_strategy.py
+
+from backend.strategies.base import BaseStrategy
+
+
+class ExampleCrossStrategy(BaseStrategy):
+    strategy_id = "example_cross_strategy"
+    name = "Example EMA Trend Cross"
+    description = "Simple example strategy using EMA + HMA trend confirmation."
+
+    parameters = {
+        "_group_filters": {
+            "type": "group",
+            "label": "Filters",
+        },
+        "fast_ema": {
+            "type": "number",
+            "label": "Fast EMA",
+            "default": 20,
+            "min": 2,
+            "max": 500,
+            "step": 1,
+            "integer": True,
+            "group": "Filters",
+        },
+        "trend_hma": {
+            "type": "number",
+            "label": "Trend HMA",
+            "default": 55,
+            "min": 2,
+            "max": 500,
+            "step": 1,
+            "integer": True,
+            "group": "Filters",
+        },
+        "reward_r": {
+            "type": "number",
+            "label": "Reward R",
+            "default": 2.0,
+            "min": 0.5,
+            "max": 10.0,
+            "step": 0.25,
+            "group": "Filters",
+        },
+        "stop_buffer": {
+            "type": "number",
+            "label": "Stop Buffer",
+            "default": 1.0,
+            "min": 0.0,
+            "max": 20.0,
+            "step": 0.25,
+            "group": "Filters",
+        },
+    }
+
+    indicators_required = [
+        {"key": "fast_ema", "kind": "EMA", "source": "close", "period_param": "fast_ema"},
+        {"key": "trend_hma", "kind": "HMA", "source": "close", "period_param": "trend_hma"},
+    ]
+
+    def on_bar(self, i, bar, indicators, state, position, bars, params):
+        if i < 2:
+            return {}
+
+        fast = indicators["current"].get("fast_ema")
+        trend = indicators["current"].get("trend_hma")
+        prev_fast = indicators["series"]["fast_ema"][i - 1]
+        prev_trend = indicators["series"]["trend_hma"][i - 1]
+
+        if fast is None or trend is None or prev_fast is None or prev_trend is None:
+            return {}
+
+        close_ = bar["close"]
+        prev_close = bars[i - 1]["close"]
+
+        # Exit logic first
+        if position:
+            if position["direction"] == "long" and close_ < fast:
+                return {
+                    "exit": True,
+                    "exit_reason": "close_below_fast_ema"
+                }
+
+            if position["direction"] == "short" and close_ > fast:
+                return {
+                    "exit": True,
+                    "exit_reason": "close_above_fast_ema"
+                }
+
+            return {}
+
+        bullish_trend = close_ > trend and fast > trend
+        bearish_trend = close_ < trend and fast < trend
+
+        crossed_up = prev_close <= prev_fast and close_ > fast
+        crossed_down = prev_close >= prev_fast and close_ < fast
+
+        if bullish_trend and crossed_up:
+            stop_loss = bar["low"] - params["stop_buffer"]
+            risk = max(0.01, close_ - stop_loss)
+            take_profit = close_ + risk * params["reward_r"]
+            return {
+                "enter": "long",
+                "entry_price": close_,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "entry_reason": "ema_cross_long"
+            }
+
+        if bearish_trend and crossed_down:
+            stop_loss = bar["high"] + params["stop_buffer"]
+            risk = max(0.01, stop_loss - close_)
+            take_profit = close_ - risk * params["reward_r"]
+            return {
+                "enter": "short",
+                "entry_price": close_,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "entry_reason": "ema_cross_short"
+            }
+
+        return {}
+
+
+Quick Checklist
+---------------
+
+Before saving a new strategy, verify all of this:
+
+[ ] File is inside backend/strategies/
+[ ] Class inherits from BaseStrategy
+[ ] strategy_id is unique
+[ ] name and description are filled in
+[ ] parameters schema is valid
+[ ] indicators_required only requests supported indicators
+[ ] on_bar(...) exists
+[ ] on_bar returns only supported action keys
+[ ] Strategy never reads future bars
+[ ] Strategy guards against None indicator values
+[ ] Strategy does not modify account balance directly
+[ ] Strategy does not use unsupported/global side effects
+[ ] Strategy handles flat vs open-position logic clearly
+[ ] Entry and exit reasons are human-readable
+[ ] Lookbacks use safe index ranges
+
+Recommended workflow
+--------------------
+1. Copy the example template.
+2. Rename the class and strategy_id.
+3. Adjust parameters.
+4. Request required indicators.
+5. Implement long logic.
+6. Implement short logic.
+7. Implement exit logic.
+8. Run the backtester on a small dataset first.
+9. Check the trade log and metrics.
+10. Only then test larger datasets.
+
+End of guide.

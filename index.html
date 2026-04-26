@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>JINNI TERMINAL</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css"/>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div class="scanline"></div>
+
+  <!-- ═══ HEADER ══════════════════════════════════════════════════════ -->
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-bracket">[</span>
+        <span class="logo-text">JINNI<span class="logo-accent">ZERO</span></span>
+        <span class="logo-bracket">]</span>
+      </div>
+      <nav class="tab-nav">
+        <button class="tab-btn active" data-tab="chart"><span class="tab-icon">▦</span>CHART</button>
+        <button class="tab-btn" data-tab="backtest"><span class="tab-icon">◈</span>BACKTEST</button>
+      </nav>
+    </div>
+
+    <div class="header-right" id="chartHeaderRight">
+      <div class="ticker-info">
+        <span class="ticker-symbol" id="tickerSymbol">NQ</span>
+        <span class="ticker-price" id="tickerPrice">—</span>
+        <span class="ticker-change" id="tickerChange">—</span>
+      </div>
+
+      <div class="interval-group">
+        <button class="interval-btn active">2PT</button>
+        <button class="interval-btn">4PT</button>
+        <button class="interval-btn">6PT</button>
+        <button class="interval-btn">8PT</button>
+        <button class="interval-btn">10PT</button>
+        <button class="interval-btn">15PT</button>
+        <button class="interval-btn">20PT</button>
+        <button class="interval-btn">25PT</button>
+        <button class="interval-btn">30PT</button>
+        <button class="interval-btn">35PT</button>
+        <button class="interval-btn">40PT</button>
+        <button class="interval-btn">45PT</button>
+        <button class="interval-btn">50PT</button>
+      </div>
+
+      <div class="status-dot-wrap">
+        <span class="status-dot"></span>
+        <span class="status-label">LIVE</span>
+      </div>
+    </div>
+
+    <div class="header-right" id="backtestHeaderRight" style="display:none;">
+      <span class="bt-header-label">STRATEGY BACKTESTER</span>
+      <div style="display:flex; gap:6px; align-items:center; margin-left:16px;">
+        <span style="font-size:0.55rem; letter-spacing:0.12em; color:var(--text-dim); font-family:var(--mono); font-weight:700;">GRAPH STEP</span>
+        <select id="bt_graphStep" class="bt-select bt-select-sm" style="width:60px; padding:4px 6px; font-size:0.65rem;">
+          <option value="1" selected>1</option>
+          <option value="2">2</option>
+          <option value="4">4</option>
+          <option value="8">8</option>
+          <option value="16">16</option>
+          <option value="32">32</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══ CHART TAB ════════════════════════════════════════════════════ -->
+  <main class="layout tab-panel active" id="tabChart">
+    <aside class="sidebar">
+      <div class="sidebar-block"><div class="sidebar-label">OPEN</div><div class="sidebar-value" id="statOpen">—</div></div>
+      <div class="sidebar-block"><div class="sidebar-label">HIGH</div><div class="sidebar-value bull" id="statHigh">—</div></div>
+      <div class="sidebar-block"><div class="sidebar-label">LOW</div><div class="sidebar-value bear" id="statLow">—</div></div>
+      <div class="sidebar-block"><div class="sidebar-label">CLOSE</div><div class="sidebar-value" id="statClose">—</div></div>
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-block"><div class="sidebar-label">VOLUME</div><div class="sidebar-value" id="statVolume">—</div></div>
+      <div class="sidebar-block"><div class="sidebar-label">CHANGE</div><div class="sidebar-value" id="statChange">—</div></div>
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-block"><div class="sidebar-label">CANDLES</div><div class="sidebar-value" id="statCandles">—</div></div>
+    </aside>
+
+    <section class="chart-area">
+      <div class="chart-container" id="chartContainer"></div>
+      <div class="chart-footer">
+        <span class="chart-hint">↕ scroll to zoom · drag to pan · hover for OHLC</span>
+        <span class="chart-powered">powered by Lightweight Charts™</span>
+      </div>
+    </section>
+  </main>
+
+  <!-- ═══ BACKTEST TAB ═════════════════════════════════════════════════ -->
+  <main class="layout tab-panel" id="tabBacktest" style="display:none;">
+    <div class="bt-root">
+      <!-- ── LEFT CONFIG ──────────────────────────────────────────── -->
+      <aside class="bt-config-panel">
+
+        <!-- MODE -->
+        <div class="bt-section">
+          <div class="bt-section-title">MODE</div>
+          <div class="bt-field">
+            <label class="bt-label">Backtest Mode</label>
+            <select class="bt-select" id="bt_mode">
+              <option value="manual" selected>Manual Mode (Legacy)</option>
+              <option value="strategy">Load Strategy Mode</option>
+            </select>
+          </div>
+          <div class="bt-toggle-label">
+            Manual Mode keeps your existing legacy controls. Load Strategy Mode auto-loads Python strategy schemas + engine settings.
+          </div>
+        </div>
+
+        <!-- shared -->
+        <div class="bt-section">
+          <div class="bt-section-title">DATA SOURCE</div>
+
+          <div class="bt-field">
+            <label class="bt-label">Range Bar Size</label>
+            <select class="bt-select" id="bt_range">
+              <option value="2" selected>2 pt</option><option value="4">4 pt</option>
+              <option value="6">6 pt</option><option value="8">8 pt</option>
+              <option value="10">10 pt</option><option value="15">15 pt</option>
+              <option value="20">20 pt</option><option value="25">25 pt</option>
+              <option value="30">30 pt</option><option value="35">35 pt</option>
+              <option value="40">40 pt</option><option value="45">45 pt</option>
+              <option value="50">50 pt</option>
+            </select>
+          </div>
+
+          <div class="bt-field">
+            <label class="bt-label">Backtest Range</label>
+            <select class="bt-select" id="bt_barRange">
+              <option value="500">Last 500 bars</option>
+              <option value="1000" selected>Last 1000 bars</option>
+              <option value="2500">Last 2500 bars</option>
+              <option value="5000">Last 5000 bars</option>
+              <option value="0">Full dataset</option>
+            </select>
+          </div>
+
+          <div class="bt-field">
+            <label class="bt-label">Starting Capital ($)</label>
+            <input class="bt-input" type="number" id="bt_startingCapital" value="10000" min="0" step="500"/>
+          </div>
+
+          <div class="bt-field">
+            <label class="bt-label">Lot Size</label>
+            <div class="bt-lotsize-row">
+              <input class="bt-input" type="number" id="bt_lotSize" value="1.0" min="0.01" step="0.01"/>
+              <span class="bt-lotsize-hint" id="bt_lotHint">1 pt = $1.00</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- MANUAL MODE ONLY -->
+        <div class="bt-section bt-manual-only">
+          <div class="bt-section-title">MOVING AVERAGES</div>
+          <div class="bt-ma-row" id="bt_ma_0">
+            <select class="bt-select bt-select-sm" data-ma-type>
+              <option value="EMA">EMA</option><option value="HMA" selected>HMA</option>
+              <option value="SMA">SMA</option><option value="WMA">WMA</option>
+            </select>
+            <input class="bt-input bt-input-sm" type="number" data-ma-period value="21" min="2" max="500"/>
+            <button class="bt-icon-btn bt-remove-ma" title="Remove">✕</button>
+          </div>
+          <button class="bt-add-btn" id="bt_addMa">+ ADD MA</button>
+        </div>
+
+        <div class="bt-section bt-manual-only">
+          <div class="bt-section-title">ENTRY LOGIC</div>
+          <div class="bt-field">
+            <label class="bt-label">Entry Condition</label>
+            <select class="bt-select" id="bt_entry">
+              <option value="above_all_mas">Price above ALL MAs (2-bar confirm)</option>
+              <option value="ma_cross">MA Cross (fast × slow)</option>
+              <option value="trend_filter">Trend Filter (close vs longest MA)</option>
+            </select>
+          </div>
+
+          <div class="bt-field">
+            <label class="bt-label">Require Candle Direction Confirmation</label>
+            <div class="bt-toggle-row">
+              <label class="bt-toggle"><input type="checkbox" id="bt_candleConfirm" checked/><span class="bt-toggle-slider"></span></label>
+              <span class="bt-toggle-label">Entry candle must match trade direction</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="bt-section bt-manual-only">
+          <div class="bt-section-title">TRADE GATING</div>
+          <div class="bt-field">
+            <label class="bt-label">One Trade Per MA</label>
+            <div class="bt-toggle-row">
+              <label class="bt-toggle"><input type="checkbox" id="bt_gatingEnabled"/><span class="bt-toggle-slider"></span></label>
+              <span class="bt-toggle-label">Lock direction until price crosses gating MA</span>
+            </div>
+          </div>
+
+          <div id="bt_gating_wrap" style="display:none;">
+            <div class="bt-field">
+              <label class="bt-label">Gating MA Type</label>
+              <select class="bt-select" id="bt_gating_ma_type">
+                <option value="HMA" selected>HMA</option>
+                <option value="EMA">EMA</option>
+                <option value="SMA">SMA</option>
+              </select>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">Gating MA Length</label>
+              <input class="bt-input" type="number" id="bt_gating_ma_length" value="21" min="2" max="500"/>
+            </div>
+          </div>
+        </div>
+
+        <div class="bt-section bt-manual-only">
+          <div class="bt-section-title">STOP LOSS</div>
+          <div class="bt-field">
+            <label class="bt-label">SL Mode</label>
+            <div class="bt-radio-group">
+              <label class="bt-radio"><input type="radio" name="sl_mode" value="fixed" checked/><span>Fixed pts</span></label>
+              <label class="bt-radio"><input type="radio" name="sl_mode" value="ma_cross"/><span>MA Cross</span></label>
+              <label class="bt-radio"><input type="radio" name="sl_mode" value="ma_snapshot"/><span>MA Snapshot</span></label>
+            </div>
+          </div>
+
+          <div class="bt-field" id="bt_sl_fixed_wrap">
+            <label class="bt-label">SL Size (points)</label>
+            <input class="bt-input" type="number" id="bt_sl_fixed" value="8" min="0.25" step="0.25"/>
+          </div>
+
+          <div id="bt_sl_ma_wrap" style="display:none;">
+            <div class="bt-field">
+              <label class="bt-label">SL MA Type</label>
+              <select class="bt-select" id="bt_sl_ma_type">
+                <option value="EMA" selected>EMA</option>
+                <option value="HMA">HMA</option>
+                <option value="SMA">SMA</option>
+              </select>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">SL MA Length</label>
+              <input class="bt-input" type="number" id="bt_sl_ma_length" value="50" min="2" max="500"/>
+            </div>
+          </div>
+
+          <div class="bt-field">
+            <label class="bt-label">Ambiguous Bar (SL+TP hit)</label>
+            <select class="bt-select" id="bt_ambiguousMode">
+              <option value="conservative" selected>Conservative (SL first)</option>
+              <option value="optimistic">Optimistic (TP first)</option>
+              <option value="nearest_to_open">Nearest to Open</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="bt-section bt-manual-only">
+          <div class="bt-section-title">TAKE PROFIT</div>
+          <div class="bt-field">
+            <label class="bt-label">TP Mode</label>
+            <div class="bt-radio-group">
+              <label class="bt-radio"><input type="radio" name="tp_mode" value="r_multiple" checked/><span>R Multiple</span></label>
+              <label class="bt-radio"><input type="radio" name="tp_mode" value="ma_cross"/><span>MA Cross</span></label>
+            </div>
+          </div>
+
+          <div class="bt-field" id="bt_tp_r_wrap">
+            <label class="bt-label">R Multiple</label>
+            <div class="bt-r-group">
+              <button class="bt-r-btn active" data-r="2">2R</button>
+              <button class="bt-r-btn" data-r="3">3R</button>
+              <button class="bt-r-btn" data-r="4">4R</button>
+              <button class="bt-r-btn" data-r="5">5R</button>
+            </div>
+          </div>
+
+          <div id="bt_tp_ma_wrap" style="display:none;">
+            <div class="bt-field">
+              <label class="bt-label">TP MA Type</label>
+              <select class="bt-select" id="bt_tp_ma_type">
+                <option value="EMA" selected>EMA</option>
+                <option value="HMA">HMA</option>
+                <option value="SMA">SMA</option>
+              </select>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">TP MA Length</label>
+              <input class="bt-input" type="number" id="bt_tp_ma_length" value="9" min="2" max="500"/>
+            </div>
+          </div>
+        </div>
+
+        <!-- shared -->
+        <div class="bt-section">
+          <div class="bt-section-title">COMMISSION</div>
+          <div class="bt-field">
+            <label class="bt-label">Commission Type</label>
+            <div class="bt-radio-group">
+              <label class="bt-radio"><input type="radio" name="comm_type" value="flat" checked/><span>Flat/trade</span></label>
+              <label class="bt-radio"><input type="radio" name="comm_type" value="per_contract"/><span>Per contract</span></label>
+              <label class="bt-radio"><input type="radio" name="comm_type" value="per_side"/><span>Per side</span></label>
+            </div>
+          </div>
+
+          <div class="bt-field">
+            <label class="bt-label">Amount ($)</label>
+            <input class="bt-input" type="number" id="bt_commission" value="4.00" min="0" step="0.5"/>
+          </div>
+        </div>
+
+        <!-- STRATEGY MODE ONLY -->
+        <div id="bt_strategyPanel" style="display:none;">
+          <div class="bt-section">
+            <div class="bt-section-title">LOAD STRATEGY</div>
+
+            <div class="bt-field">
+              <label class="bt-label">Available Strategy</label>
+              <select class="bt-select" id="bt_strategySelect"></select>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">Description</label>
+              <div class="bt-toggle-label" id="bt_strategyDescription">Loading strategies…</div>
+            </div>
+          </div>
+
+          <div class="bt-section">
+            <div class="bt-section-title">STRATEGY PARAMETERS</div>
+            <div id="bt_strategyParams"></div>
+          </div>
+
+          <div class="bt-section">
+            <div class="bt-section-title">ENGINE SETTINGS</div>
+            <div id="bt_engineParams"></div>
+          </div>
+
+          <div class="bt-section">
+            <div class="bt-section-title">SIMULATION</div>
+
+            <div class="bt-field">
+              <label class="bt-label">Monte Carlo Runs</label>
+              <input class="bt-input" type="number" id="bt_mcRuns" value="1000" min="0" step="100"/>
+            </div>
+          </div>
+
+          <div class="bt-run-wrap">
+            <button class="bt-run-btn" id="bt_strategyRunBtn">
+              <span class="bt-run-icon">▶</span> RUN BACKTEST
+            </button>
+          </div>
+        </div>
+
+        <!-- MANUAL RUN -->
+        <div class="bt-run-wrap bt-manual-only" id="bt_manualRunWrap">
+          <button class="bt-run-btn" id="bt_runBtn">
+            <span class="bt-run-icon">▶</span> START BACKTEST
+          </button>
+        </div>
+      </aside>
+
+      <!-- ── RIGHT RESULTS ─────────────────────────────────────────── -->
+      <div class="bt-results-panel" id="bt_resultsPanel">
+        <div class="bt-progress-wrap" id="bt_progressWrap" style="display:none;">
+          <div class="bt-progress-header">
+            <span class="bt-progress-label" id="bt_progressLabel">Initialising…</span>
+            <span class="bt-progress-pct" id="bt_progressPct">0%</span>
+          </div>
+          <div class="bt-progress-track"><div class="bt-progress-bar" id="bt_progressBar" style="width:0%"></div></div>
+          <div class="bt-progress-steps">
+            <span class="bt-step" id="step_load">LOAD DATA</span><span class="bt-step-arrow">→</span>
+            <span class="bt-step" id="step_run">RUN LOGIC</span><span class="bt-step-arrow">→</span>
+            <span class="bt-step" id="step_stats">COMPUTE STATS</span><span class="bt-step-arrow">→</span>
+            <span class="bt-step" id="step_charts">BUILD CHARTS</span><span class="bt-step-arrow">→</span>
+            <span class="bt-step" id="step_done">DONE</span>
+          </div>
+          <div class="bt-live-stats" id="bt_liveStats" style="display:none;">
+            <div class="bt-live-stat"><span class="bt-live-label">EQUITY</span><span class="bt-live-value" id="bt_liveEquity">—</span></div>
+            <div class="bt-live-stat"><span class="bt-live-label">DRAWDOWN</span><span class="bt-live-value" id="bt_liveDD">—</span></div>
+            <div class="bt-live-stat"><span class="bt-live-label">OPEN TRADE</span><span class="bt-live-value" id="bt_liveOpen">—</span></div>
+            <div class="bt-live-stat"><span class="bt-live-label">LAST P&L</span><span class="bt-live-value" id="bt_lastPnl">—</span></div>
+          </div>
+        </div>
+
+        <div class="bt-empty" id="bt_empty">
+          <div class="bt-empty-icon">◈</div>
+          <div class="bt-empty-title">No results yet</div>
+          <div class="bt-empty-sub">Configure your strategy and press START BACKTEST</div>
+        </div>
+
+        <div class="bt-dashboard" id="bt_dashboard" style="display:none;">
+          <div class="bt-dash-header">
+            <div class="bt-dash-strategy" id="bd_strategy">—</div>
+            <div class="bt-dash-meta" id="bd_meta">—</div>
+          </div>
+
+          <div class="bt-dash-section"><div class="bt-dash-section-title">CORE STATISTICS</div><div class="bt-kpi-grid" id="bd_coreKpis"></div></div>
+          <div class="bt-dash-section"><div class="bt-dash-section-title">RISK METRICS</div><div class="bt-kpi-grid" id="bd_riskKpis"></div></div>
+          <div class="bt-dash-section"><div class="bt-dash-section-title">PERFORMANCE RATIOS</div><div class="bt-kpi-grid" id="bd_ratioKpis"></div></div>
+
+          <div class="bt-dash-section"><div class="bt-dash-section-title">EQUITY CURVE</div><div class="bt-chart-card"><canvas id="cv_equity" class="bt-canvas"></canvas></div></div>
+          <div class="bt-dash-section"><div class="bt-dash-section-title">DRAWDOWN CURVE</div><div class="bt-chart-card"><canvas id="cv_drawdown" class="bt-canvas"></canvas></div></div>
+
+          <div class="bt-dash-section">
+            <div class="bt-dash-section-title">ROLLING METRICS <span class="bt-dash-sub">(20-trade window)</span></div>
+            <div class="bt-chart-2col">
+              <div class="bt-chart-card"><div class="bt-chart-label">WIN RATE %</div><canvas id="cv_rollWr" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card"><div class="bt-chart-label">EXPECTANCY $</div><canvas id="cv_rollExp" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card"><div class="bt-chart-label">PROFIT FACTOR</div><canvas id="cv_rollPf" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card"><div class="bt-chart-label">SHARPE RATIO</div><canvas id="cv_rollSharpe" class="bt-canvas bt-canvas-sm"></canvas></div>
+            </div>
+          </div>
+
+          <div class="bt-dash-section">
+            <div class="bt-dash-section-title">DISTRIBUTIONS</div>
+            <div class="bt-chart-2col">
+              <div class="bt-chart-card"><div class="bt-chart-label">R-MULTIPLE HISTOGRAM</div><canvas id="cv_rHist" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card"><div class="bt-chart-label">TRADE DURATION (BARS)</div><canvas id="cv_durHist" class="bt-canvas bt-canvas-sm"></canvas></div>
+            </div>
+          </div>
+
+          <div class="bt-dash-section">
+            <div class="bt-dash-section-title">SCATTER ANALYSIS</div>
+            <div class="bt-chart-2col">
+              <div class="bt-chart-card"><div class="bt-chart-label">MAE vs MFE</div><canvas id="cv_maemfe" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card"><div class="bt-chart-label">TRADE # vs R-MULTIPLE</div><canvas id="cv_retScatter" class="bt-canvas bt-canvas-sm"></canvas></div>
+            </div>
+          </div>
+
+          <div class="bt-dash-section">
+            <div class="bt-dash-section-title">TIME BREAKDOWN</div>
+            <div class="bt-chart-3col">
+              <div class="bt-chart-card"><div class="bt-chart-label">BY HOUR OF DAY</div><canvas id="cv_hour" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card"><div class="bt-chart-label">BY DAY OF WEEK</div><canvas id="cv_dow" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card"><div class="bt-chart-label">BY MONTH</div><canvas id="cv_month" class="bt-canvas bt-canvas-sm"></canvas></div>
+            </div>
+          </div>
+
+          <div class="bt-dash-section"><div class="bt-dash-section-title">REGIME BREAKDOWN</div><div class="bt-kpi-grid" id="bd_regimeKpis"></div></div>
+
+          <div class="bt-dash-section">
+            <div class="bt-dash-section-title">MONTE CARLO <span class="bt-dash-sub">(configurable runs)</span></div>
+            <div class="bt-kpi-grid" id="bd_mcKpis"></div>
+
+            <div class="bt-chart-2col" style="margin-top:12px;">
+              <div class="bt-chart-card"><div class="bt-chart-label">SIMULATED EQUITY PATHS</div><canvas id="cv_mcPaths" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card"><div class="bt-chart-label">FINAL EQUITY DISTRIBUTION</div><canvas id="cv_mcFinal" class="bt-canvas bt-canvas-sm"></canvas></div>
+            </div>
+
+            <div class="bt-chart-2col" style="margin-top:10px;">
+              <div class="bt-chart-card"><div class="bt-chart-label">MAX DRAWDOWN DISTRIBUTION</div><canvas id="cv_mcDd" class="bt-canvas bt-canvas-sm"></canvas></div>
+              <div class="bt-chart-card" style="padding:16px 18px;">
+                <div class="bt-chart-label" style="margin-bottom:12px;">PROBABILITY TABLE</div>
+                <div id="bd_mcProb"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bt-dash-section"><div class="bt-dash-section-title">COMMISSION SUMMARY</div><div class="bt-kpi-grid" id="bd_commKpis"></div></div>
+
+          <div class="bt-dash-section" style="margin-bottom:24px;">
+            <div class="bt-dash-section-title">TRADE LOG</div>
+            <div class="bt-chart-card" style="padding:0; overflow:hidden;">
+              <div class="bt-trade-log" id="bt_tradeLog"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="chart.js"></script>
+  <script src="backtest.js"></script>
+  <script src="strategy_loader.js"></script>
+</body>
+</html>
