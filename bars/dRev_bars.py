@@ -29,82 +29,20 @@ OUTPUT_DIR = "data"
 RANGE_SIZES = [2, 4, 6, 8, 10]
 INCLUDE_PARTIAL_BAR = True   # keep last unfinished candle for chart display
 
+# Stream settings:
+# - This is the number of CSV rows to read/process per chunk.
+# - Set to 50 if you want super tiny chunks, but 50,000 is way faster.
+CHUNK_ROWS = 50000
 
-# ── LOAD TICKS ───────────────────────────────────────────────────────
-def load_ticks(path):
-    ticks = []
-
-    with open(path, newline="", encoding="utf-8") as f:
-        sample = f.read(4096)
-        f.seek(0)
-
-        delim = "\t" if "\t" in sample else ","
-        reader = csv.DictReader(f, delimiter=delim)
-
-        for row in reader:
-            clean_row = {}
-            for k, v in row.items():
-                key = (k or "").strip().strip("<>")
-                val = (v or "").strip()
-                clean_row[key] = val
-
-            date_str = clean_row.get("DATE", "")
-            time_str = clean_row.get("TIME", "")
-
-            price_raw = (
-                clean_row.get("LAST")
-                or clean_row.get("BID")
-                or clean_row.get("ASK")
-                or ""
-            ).strip()
-
-            if not price_raw:
-                continue
-
-            try:
-                price = float(price_raw)
-            except ValueError:
-                continue
-
-            vol_raw = clean_row.get("VOLUME", "").strip()
-            try:
-                volume = float(vol_raw) if vol_raw else 0.0
-            except ValueError:
-                volume = 0.0
-
-            # Try to preserve milliseconds if present
-            ts = 0
-            if date_str and time_str:
-                date_clean = date_str.replace(".", "-")
-
-                dt = None
-                for fmt in (
-                    "%Y-%m-%d %H:%M:%S.%f",
-                    "%Y-%m-%d %H:%M:%S",
-                ):
-                    try:
-                        dt = datetime.strptime(f"{date_clean} {time_str}", fmt)
-                        break
-                    except ValueError:
-                        pass
-
-                if dt is not None:
-                    ts = int(dt.timestamp())
-
-            ticks.append({
-                "ts": ts,
-                "price": price,
-                "volume": volume
-            })
-
-    ticks.sort(key=lambda x: x["ts"])
-    return ticks
+# If your CSV is guaranteed already sorted by time, keep this True.
+# (Original script sorted in-memory; streaming can't without huge memory.)
+ASSUME_INPUT_SORTED = True
 
 
 # ── HELPERS ──────────────────────────────────────────────────────────
 def make_bar(time_, open_, high_, low_, close_, volume_):
     return {
-        "time": time_,
+        "time": int(time_),
         "open": round(open_, 2),
         "high": round(high_, 2),
         "low": round(low_, 2),
@@ -113,61 +51,183 @@ def make_bar(time_, open_, high_, low_, close_, volume_):
     }
 
 
-# ── BUILD RANGE BARS ─────────────────────────────────────────────────
-def build_range_bars(ticks, range_size, include_partial=True):
+def _detect_delimiter(path):
+    with open(path, newline="", encoding="utf-8") as f:
+        sample = f.read(4096)
+    return "\t" if "\t" in sample else ","
+
+
+def _parse_tick_row(row):
     """
-    GoCharting-ish reversal range bars:
-    - continuation = 1x range size
-    - reversal     = 2x range size
-
-    Trend meanings:
-      0  = unknown / startup
-      1  = bullish
-     -1  = bearish
+    Parses a DictReader row into a tick dict: {"ts": int, "price": float, "volume": float}
+    Returns None if invalid.
     """
-    bars = []
-    if not ticks:
-        return bars
+    clean_row = {}
+    for k, v in row.items():
+        key = (k or "").strip().strip("<>")
+        val = (v or "").strip()
+        clean_row[key] = val
 
-    first = ticks[0]
-    trend = 0
+    date_str = clean_row.get("DATE", "")
+    time_str = clean_row.get("TIME", "")
 
-    bar = {
-        "time": first["ts"],
-        "open": first["price"],
-        "high": first["price"],
-        "low": first["price"],
-        "close": first["price"],
-        "volume": first["volume"],
-    }
+    price_raw = (
+        clean_row.get("LAST")
+        or clean_row.get("BID")
+        or clean_row.get("ASK")
+        or ""
+    ).strip()
 
-    for tick in ticks[1:]:
+    if not price_raw:
+        return None
+
+    try:
+        price = float(price_raw)
+    except ValueError:
+        return None
+
+    vol_raw = clean_row.get("VOLUME", "").strip()
+    try:
+        volume = float(vol_raw) if vol_raw else 0.0
+    except ValueError:
+        volume = 0.0
+
+    ts = 0
+    if date_str and time_str:
+        date_clean = date_str.replace(".", "-")
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.strptime(f"{date_clean} {time_str}", fmt)
+                break
+            except ValueError:
+                pass
+        if dt is not None:
+            ts = int(dt.timestamp())
+
+    return {"ts": ts, "price": price, "volume": volume}
+
+
+def iter_ticks_in_chunks(path, chunk_rows=50000):
+    """
+    Streams ticks from CSV in chunks (lists) to avoid loading everything into RAM.
+    """
+    delim = _detect_delimiter(path)
+
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter=delim)
+
+        chunk = []
+        for row in reader:
+            tick = _parse_tick_row(row)
+            if tick is None:
+                continue
+
+            chunk.append(tick)
+            if len(chunk) >= chunk_rows:
+                yield chunk
+                chunk = []
+
+        if chunk:
+            yield chunk
+
+
+# ── STREAMING RANGE BAR BUILDER (per range size) ─────────────────────
+class RangeBarStreamer:
+    """
+    Builds range bars incrementally (tick-by-tick) and streams JSON output to disk,
+    so we never store all ticks or all bars in memory.
+
+    Logic matches the original build_range_bars():
+    - continuation = 1x range_size
+    - reversal     = 2x range_size
+    """
+    def __init__(self, range_size, out_path, include_partial=True):
+        self.range_size = float(range_size)
+        self.include_partial = include_partial
+
+        self.trend = 0  # 0 unknown, 1 bullish, -1 bearish
+        self.bar = None
+
+        # output streaming
+        self.out_path = out_path
+        self._f = open(out_path, "w", encoding="utf-8")
+        self._f.write("[")
+        self._wrote_any = False
+
+        # timestamp dedupe (matches fix_timestamps)
+        self._last_written_ts = None
+
+    def close(self):
+        if self._f:
+            self._f.close()
+            self._f = None
+
+    def _emit(self, bar_dict):
+        # fix timestamps like fix_timestamps() but streaming
+        ts = int(bar_dict["time"])
+        if self._last_written_ts is not None and ts <= self._last_written_ts:
+            ts = self._last_written_ts + 1
+        bar_dict["time"] = ts
+        self._last_written_ts = ts
+
+        if self._wrote_any:
+            self._f.write(",")
+        else:
+            self._wrote_any = True
+
+        self._f.write(json.dumps(bar_dict, separators=(",", ":")))
+
+    def _finalize_output(self):
+        self._f.write("]")
+        self._f.flush()
+        self.close()
+
+    def _start_bar(self, tick):
+        p = tick["price"]
+        self.bar = {
+            "time": tick["ts"],
+            "open": p,
+            "high": p,
+            "low": p,
+            "close": p,
+            "volume": tick["volume"],
+        }
+
+    def process_tick(self, tick):
+        if self.bar is None:
+            self._start_bar(tick)
+            return
+
         p = tick["price"]
         v = tick["volume"]
+        rs = self.range_size
 
         # add tick volume to current developing bar
-        bar["volume"] += v
+        self.bar["volume"] += v
 
+        # NOTE: keep while True because a single tick can complete multiple bars
         while True:
-            o = bar["open"]
+            o = self.bar["open"]
 
             # ── STARTUP / NO TREND YET ───────────────────────────────
-            if trend == 0:
-                up_target = o + range_size
-                down_target = o - range_size
+            if self.trend == 0:
+                up_target = o + rs
+                down_target = o - rs
 
                 if p >= up_target:
-                    bar["high"] = max(bar["high"], up_target)
-                    bar["low"] = min(bar["low"], o)
-                    bar["close"] = up_target
+                    self.bar["high"] = max(self.bar["high"], up_target)
+                    self.bar["low"] = min(self.bar["low"], o)
+                    self.bar["close"] = up_target
 
-                    bars.append(make_bar(
-                        bar["time"], bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"]
+                    self._emit(make_bar(
+                        self.bar["time"], self.bar["open"], self.bar["high"],
+                        self.bar["low"], self.bar["close"], self.bar["volume"]
                     ))
 
-                    trend = 1
+                    self.trend = 1
                     new_open = up_target
-                    bar = {
+                    self.bar = {
                         "time": tick["ts"],
                         "open": new_open,
                         "high": new_open,
@@ -178,17 +238,18 @@ def build_range_bars(ticks, range_size, include_partial=True):
                     continue
 
                 elif p <= down_target:
-                    bar["high"] = max(bar["high"], o)
-                    bar["low"] = min(bar["low"], down_target)
-                    bar["close"] = down_target
+                    self.bar["high"] = max(self.bar["high"], o)
+                    self.bar["low"] = min(self.bar["low"], down_target)
+                    self.bar["close"] = down_target
 
-                    bars.append(make_bar(
-                        bar["time"], bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"]
+                    self._emit(make_bar(
+                        self.bar["time"], self.bar["open"], self.bar["high"],
+                        self.bar["low"], self.bar["close"], self.bar["volume"]
                     ))
 
-                    trend = -1
+                    self.trend = -1
                     new_open = down_target
-                    bar = {
+                    self.bar = {
                         "time": tick["ts"],
                         "open": new_open,
                         "high": new_open,
@@ -199,28 +260,29 @@ def build_range_bars(ticks, range_size, include_partial=True):
                     continue
 
                 else:
-                    bar["high"] = max(bar["high"], p)
-                    bar["low"] = min(bar["low"], p)
-                    bar["close"] = p
+                    self.bar["high"] = max(self.bar["high"], p)
+                    self.bar["low"] = min(self.bar["low"], p)
+                    self.bar["close"] = p
                     break
 
             # ── BULL TREND ───────────────────────────────────────────
-            elif trend == 1:
-                cont_target = o + range_size
-                rev_target = o - (2 * range_size)
+            elif self.trend == 1:
+                cont_target = o + rs
+                rev_target = o - (2 * rs)
 
                 # bullish continuation
                 if p >= cont_target:
-                    bar["high"] = max(bar["high"], cont_target)
-                    bar["low"] = min(bar["low"], o)
-                    bar["close"] = cont_target
+                    self.bar["high"] = max(self.bar["high"], cont_target)
+                    self.bar["low"] = min(self.bar["low"], o)
+                    self.bar["close"] = cont_target
 
-                    bars.append(make_bar(
-                        bar["time"], bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"]
+                    self._emit(make_bar(
+                        self.bar["time"], self.bar["open"], self.bar["high"],
+                        self.bar["low"], self.bar["close"], self.bar["volume"]
                     ))
 
                     new_open = cont_target
-                    bar = {
+                    self.bar = {
                         "time": tick["ts"],
                         "open": new_open,
                         "high": new_open,
@@ -232,24 +294,24 @@ def build_range_bars(ticks, range_size, include_partial=True):
 
                 # bearish reversal requires double range
                 elif p <= rev_target:
-                    rev_open = o - range_size
-                    rev_close = o - (2 * range_size)
+                    rev_open = o - rs
+                    rev_close = o - (2 * rs)
 
-                    high_ = max(bar["high"], o)
-                    low_ = min(bar["low"], rev_close)
+                    high_ = max(self.bar["high"], o)
+                    low_ = min(self.bar["low"], rev_close)
 
-                    bars.append(make_bar(
-                        bar["time"],
+                    self._emit(make_bar(
+                        self.bar["time"],
                         rev_open,
                         high_,
                         low_,
                         rev_close,
-                        bar["volume"]
+                        self.bar["volume"]
                     ))
 
-                    trend = -1
+                    self.trend = -1
                     new_open = rev_close
-                    bar = {
+                    self.bar = {
                         "time": tick["ts"],
                         "open": new_open,
                         "high": new_open,
@@ -259,30 +321,30 @@ def build_range_bars(ticks, range_size, include_partial=True):
                     }
                     continue
 
-                # no completion yet -> just wick/developing candle
                 else:
-                    bar["high"] = max(bar["high"], p)
-                    bar["low"] = min(bar["low"], p)
-                    bar["close"] = p
+                    self.bar["high"] = max(self.bar["high"], p)
+                    self.bar["low"] = min(self.bar["low"], p)
+                    self.bar["close"] = p
                     break
 
             # ── BEAR TREND ───────────────────────────────────────────
-            elif trend == -1:
-                cont_target = o - range_size
-                rev_target = o + (2 * range_size)
+            elif self.trend == -1:
+                cont_target = o - rs
+                rev_target = o + (2 * rs)
 
                 # bearish continuation
                 if p <= cont_target:
-                    bar["high"] = max(bar["high"], o)
-                    bar["low"] = min(bar["low"], cont_target)
-                    bar["close"] = cont_target
+                    self.bar["high"] = max(self.bar["high"], o)
+                    self.bar["low"] = min(self.bar["low"], cont_target)
+                    self.bar["close"] = cont_target
 
-                    bars.append(make_bar(
-                        bar["time"], bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"]
+                    self._emit(make_bar(
+                        self.bar["time"], self.bar["open"], self.bar["high"],
+                        self.bar["low"], self.bar["close"], self.bar["volume"]
                     ))
 
                     new_open = cont_target
-                    bar = {
+                    self.bar = {
                         "time": tick["ts"],
                         "open": new_open,
                         "high": new_open,
@@ -294,24 +356,24 @@ def build_range_bars(ticks, range_size, include_partial=True):
 
                 # bullish reversal requires double range
                 elif p >= rev_target:
-                    rev_open = o + range_size
-                    rev_close = o + (2 * range_size)
+                    rev_open = o + rs
+                    rev_close = o + (2 * rs)
 
-                    high_ = max(bar["high"], rev_close)
-                    low_ = min(bar["low"], o)
+                    high_ = max(self.bar["high"], rev_close)
+                    low_ = min(self.bar["low"], o)
 
-                    bars.append(make_bar(
-                        bar["time"],
+                    self._emit(make_bar(
+                        self.bar["time"],
                         rev_open,
                         high_,
                         low_,
                         rev_close,
-                        bar["volume"]
+                        self.bar["volume"]
                     ))
 
-                    trend = 1
+                    self.trend = 1
                     new_open = rev_close
-                    bar = {
+                    self.bar = {
                         "time": tick["ts"],
                         "open": new_open,
                         "high": new_open,
@@ -321,55 +383,30 @@ def build_range_bars(ticks, range_size, include_partial=True):
                     }
                     continue
 
-                # no completion yet -> just wick/developing candle
                 else:
-                    bar["high"] = max(bar["high"], p)
-                    bar["low"] = min(bar["low"], p)
-                    bar["close"] = p
+                    self.bar["high"] = max(self.bar["high"], p)
+                    self.bar["low"] = min(self.bar["low"], p)
+                    self.bar["close"] = p
                     break
 
-    if include_partial and (
-        bar["high"] != bar["low"] or bar["close"] != bar["open"]
-    ):
-        bars.append(make_bar(
-            bar["time"], bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"]
-        ))
+    def finish(self):
+        # append partial bar (same condition as original)
+        if self.include_partial and self.bar is not None:
+            if (self.bar["high"] != self.bar["low"]) or (self.bar["close"] != self.bar["open"]):
+                self._emit(make_bar(
+                    self.bar["time"], self.bar["open"], self.bar["high"],
+                    self.bar["low"], self.bar["close"], self.bar["volume"]
+                ))
 
-    return bars
-
-
-# ── DEDUPLICATE TIMESTAMPS ───────────────────────────────────────────
-def fix_timestamps(bars):
-    fixed = []
-    last_ts = None
-
-    for b in bars:
-        ts = b["time"]
-        if last_ts is not None and ts <= last_ts:
-            ts = last_ts + 1
-        b["time"] = ts
-        last_ts = ts
-        fixed.append(b)
-
-    return fixed
-
-
-# ── SAVE JSON ────────────────────────────────────────────────────────
-def save_json(bars, range_size):
-    fname = f"{range_size}pt.json"
-    out_path = os.path.join(OUTPUT_DIR, fname)
-
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(bars, f, separators=(",", ":"))
-
-    return out_path, fname
+        self._finalize_output()
 
 
 # ── MAIN ─────────────────────────────────────────────────────────────
 def main():
     print("=" * 58)
-    print("  NQ Range Bar Generator (Double-Reversal Logic)")
+    print("  NQ Range Bar Generator (Double-Reversal Logic) [STREAMING]")
     print(f"  Ranges: {RANGE_SIZES} points")
+    print(f"  Chunk rows: {CHUNK_ROWS:,}")
     print("=" * 58)
 
     if not os.path.exists(INPUT_FILE):
@@ -377,28 +414,94 @@ def main():
         print("    Put nq.csv inside the data/ folder and re-run.")
         return
 
-    print(f"\n  Loading ticks from {INPUT_FILE} ...")
-    ticks = load_ticks(INPUT_FILE)
-
-    if not ticks:
-        print("  ✗ No valid ticks found — check CSV format.")
-        return
-
-    print(f"  ✓ Loaded {len(ticks):,} ticks\n")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    for rng in RANGE_SIZES:
-        print(f"  Building {rng}-point bars ...", end="  ")
-        bars = build_range_bars(ticks, rng, include_partial=INCLUDE_PARTIAL_BAR)
-        bars = fix_timestamps(bars)
-        out_path, _ = save_json(bars, rng)
-        print(f"→ {len(bars):,} bars  saved: {out_path}")
+    # Prepare stream writers (one file per range size)
+    streamers = {}
+    out_paths = {}
+    try:
+        for rng in RANGE_SIZES:
+            fname = f"{rng}pt.json"
+            out_path = os.path.join(OUTPUT_DIR, fname)
+            out_paths[rng] = out_path
 
-    print("\n" + "=" * 58)
-    print("  Done. Files saved in data/:")
-    for rng in RANGE_SIZES:
-        print(f"    data/{rng}pt.json")
-    print("=" * 58)
+            print(f"  Opening output stream: {out_path}")
+            streamers[rng] = RangeBarStreamer(
+                range_size=rng,
+                out_path=out_path,
+                include_partial=INCLUDE_PARTIAL_BAR
+            )
+
+        print(f"\n  Streaming ticks from {INPUT_FILE} ...")
+
+        total_ticks = 0
+        last_ts_seen = None
+        chunk_idx = 0
+
+        for chunk in iter_ticks_in_chunks(INPUT_FILE, chunk_rows=CHUNK_ROWS):
+            chunk_idx += 1
+
+            # If you absolutely need perfect chronological order (like original),
+            # you must have sorted input. We'll optionally sort per chunk, but that
+            # does NOT fully replicate global sort unless input is already sorted.
+            if not ASSUME_INPUT_SORTED:
+                chunk.sort(key=lambda x: x["ts"])
+
+            for tick in chunk:
+                ts = tick["ts"]
+
+                # If timestamp parsing failed (ts=0), keep it monotonic so we don't
+                # dump a pile of zeros at the start.
+                if ts == 0:
+                    ts = (last_ts_seen + 1) if last_ts_seen is not None else 1
+                    tick["ts"] = ts
+
+                # If the input isn't sorted, enforce monotonic timestamps to avoid
+                # weird backwards-time artifacts (original code globally sorted).
+                if last_ts_seen is not None and ts < last_ts_seen:
+                    # keep time non-decreasing
+                    tick["ts"] = last_ts_seen
+                    ts = last_ts_seen
+
+                last_ts_seen = ts
+
+                for rng in RANGE_SIZES:
+                    streamers[rng].process_tick(tick)
+
+                total_ticks += 1
+
+            print(f"  ✓ chunk {chunk_idx} processed  (ticks so far: {total_ticks:,})")
+
+        print(f"\n  ✓ Total ticks processed: {total_ticks:,}")
+        print("  Finalizing bars + closing files...")
+
+        for rng in RANGE_SIZES:
+            streamers[rng].finish()
+
+        print("\n" + "=" * 58)
+        print("  Done. Files saved in data/:")
+        for rng in RANGE_SIZES:
+            print(f"    data/{rng}pt.json")
+        print("=" * 58)
+
+    finally:
+        # Ensure files close on any error
+        for s in streamers.values():
+            try:
+                if s:
+                    # if not finished yet, close cleanly
+                    if s._f is not None:
+                        # attempt to close JSON array properly if mid-run
+                        try:
+                            s._f.write("]")
+                        except Exception:
+                            pass
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
