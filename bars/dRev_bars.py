@@ -52,33 +52,40 @@ def make_bar(time_, open_, high_, low_, close_, volume_):
 
 
 def _detect_delimiter(path):
-    with open(path, newline="", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
         sample = f.read(4096)
     return "\t" if "\t" in sample else ","
 
 
+
 def _parse_tick_row(row):
     """
-    Parses a DictReader row into a tick dict: {"ts": int, "price": float, "volume": float}
-    Returns None if invalid.
+    Parses a row like:
+    2023.01.02 23:00:00.374,11047.869,11051.301
+
+    Returns:
+        {"ts": int, "price": float, "volume": float}
     """
-    clean_row = {}
-    for k, v in row.items():
-        key = (k or "").strip().strip("<>")
-        val = (v or "").strip()
-        clean_row[key] = val
+    if not row or len(row) < 2:
+        return None
 
-    date_str = clean_row.get("DATE", "")
-    time_str = clean_row.get("TIME", "")
+    ts_raw = row[0].strip()
+    price_raw = row[1].strip()
+    vol_raw = row[2].strip() if len(row) >= 3 else "0"
 
-    price_raw = (
-        clean_row.get("LAST")
-        or clean_row.get("BID")
-        or clean_row.get("ASK")
-        or ""
-    ).strip()
+    if not ts_raw or not price_raw:
+        return None
 
-    if not price_raw:
+    # parse datetime
+    dt = None
+    for fmt in ("%Y.%m.%d %H:%M:%S.%f", "%Y.%m.%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(ts_raw, fmt)
+            break
+        except ValueError:
+            continue
+
+    if dt is None:
         return None
 
     try:
@@ -86,36 +93,22 @@ def _parse_tick_row(row):
     except ValueError:
         return None
 
-    vol_raw = clean_row.get("VOLUME", "").strip()
     try:
         volume = float(vol_raw) if vol_raw else 0.0
     except ValueError:
         volume = 0.0
 
-    ts = 0
-    if date_str and time_str:
-        date_clean = date_str.replace(".", "-")
-        dt = None
-        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-            try:
-                dt = datetime.strptime(f"{date_clean} {time_str}", fmt)
-                break
-            except ValueError:
-                pass
-        if dt is not None:
-            ts = int(dt.timestamp())
-
-    return {"ts": ts, "price": price, "volume": volume}
+    return {"ts": int(dt.timestamp()), "price": price, "volume": volume}
 
 
 def iter_ticks_in_chunks(path, chunk_rows=50000):
     """
-    Streams ticks from CSV in chunks (lists) to avoid loading everything into RAM.
+    Streams ticks from headerless CSV in chunks without loading full file.
     """
     delim = _detect_delimiter(path)
 
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter=delim)
+    with open(path, newline="", encoding="utf-8", errors="ignore") as f:
+        reader = csv.reader(f, delimiter=delim)
 
         chunk = []
         for row in reader:
@@ -124,13 +117,13 @@ def iter_ticks_in_chunks(path, chunk_rows=50000):
                 continue
 
             chunk.append(tick)
+
             if len(chunk) >= chunk_rows:
                 yield chunk
                 chunk = []
 
         if chunk:
             yield chunk
-
 
 # ── STREAMING RANGE BAR BUILDER (per range size) ─────────────────────
 class RangeBarStreamer:

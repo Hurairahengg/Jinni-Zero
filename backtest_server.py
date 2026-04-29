@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
 from backend.strategy_api import strategy_api
+from backend.stats_engine import compute_all_stats, downsample_curve as ds_curve
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -19,26 +20,54 @@ DATA_DIR = "data"
 app.register_blueprint(strategy_api, url_prefix="/api")
 
 # ════════════════════════════════════════════════════════════════════
+#  DATETIME HELPER
+# ════════════════════════════════════════════════════════════════════
+def _parse_datetime_param(val):
+    if not val or not isinstance(val, str) or not val.strip():
+        return None
+    val = val.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(val, fmt)
+            dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except ValueError:
+            continue
+    return None
+
+# ════════════════════════════════════════════════════════════════════
 #  DATA
 # ════════════════════════════════════════════════════════════════════
-def load_bars(range_pt, bar_range):
+def load_bars(range_pt, bar_range, start_date=None, end_date=None):
     path = os.path.join(DATA_DIR, f"{range_pt}pt.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Dataset not found: {path}")
     with open(path) as f:
         bars = json.load(f)
     total = len(bars)
+
+    start_ts = _parse_datetime_param(start_date)
+    end_ts   = _parse_datetime_param(end_date)
+    if start_ts is not None or end_ts is not None:
+        before = len(bars)
+        if start_ts is not None:
+            bars = [b for b in bars if b["time"] >= start_ts]
+        if end_ts is not None:
+            bars = [b for b in bars if b["time"] <= end_ts]
+        print(f"  [DATA] Date filter: {before} → {len(bars)} bars"
+              f"  (start={start_date}, end={end_date})")
+
     if bar_range and bar_range > 0:
         bars = bars[-bar_range:]
     print(f"  [DATA] Loaded {path} — {total} total bars, using last {len(bars)}")
     return bars
 
 # ════════════════════════════════════════════════════════════════════
-#  O(n) PRECOMPUTATION FUNCTIONS  (the HMA speedup)
+#  O(n) PRECOMPUTATION FUNCTIONS
 # ════════════════════════════════════════════════════════════════════
 
 def _precompute_sma(closes, period):
-    """O(n) rolling SMA."""
     n = len(closes)
     out = [None] * n
     if period < 1 or n < period:
@@ -53,7 +82,6 @@ def _precompute_sma(closes, period):
     return out
 
 def _precompute_ema(closes, period):
-    """O(n) incremental EMA."""
     n = len(closes)
     out = [None] * n
     if period < 1 or n < period:
@@ -70,33 +98,18 @@ def _precompute_ema(closes, period):
     return out
 
 def _precompute_wma(closes, period):
-    """O(n) rolling WMA using incremental weighted-sum trick.
-    W = sum(closes[i-j] * (period-j) for j in 0..period-1) / denom
-    Recurrence:
-        plain_sum[i] = plain_sum[i-1] + closes[i] - closes[i-period]
-        weighted_sum[i] = weighted_sum[i-1] + period * closes[i] - plain_sum[i-1] - closes[i-period] * 0
-    Actually the cleanest O(n) formulation:
-        S[i]  = sum of last p closes  (rolling)
-        WS[i] = weighted sum          (rolling)
-        On step from i-1 to i:
-            S[i] = S[i-1] + closes[i] - closes[i - p]
-            WS[i] = WS[i-1] + p * closes[i] - S[i-1]
-        (dropping the element that was weight 1 and shifting all weights down by 1)
-    """
     n = len(closes)
     p = period
     out = [None] * n
     if p < 1 or n < p:
         return out
     denom = p * (p + 1) / 2.0
-    # Compute initial S and WS at index p-1
     ws = 0.0
     s = 0.0
     for j in range(p):
         s += closes[j]
-        ws += closes[j] * (j + 1)  # weight: 1..p  (oldest=1, newest=p)
+        ws += closes[j] * (j + 1)
     out[p - 1] = ws / denom
-    # Roll forward
     for i in range(p, n):
         ws = ws + p * closes[i] - s
         s = s + closes[i] - closes[i - p]
@@ -104,9 +117,6 @@ def _precompute_wma(closes, period):
     return out
 
 def _precompute_hma(closes, period):
-    """O(n) HMA = WMA( 2*WMA(closes, period/2) - WMA(closes, period), sqrt(period) )
-    All three WMA passes use O(n) rolling computation.
-    """
     n = len(closes)
     p = period
     half = p // 2
@@ -116,8 +126,6 @@ def _precompute_hma(closes, period):
         return out
     wma_full = _precompute_wma(closes, p)
     wma_half = _precompute_wma(closes, half)
-    # Build diff series: 2 * WMA(half) - WMA(full)
-    # Only valid where both are non-None
     diff = [None] * n
     diff_start = None
     for i in range(n):
@@ -127,15 +135,14 @@ def _precompute_hma(closes, period):
                 diff_start = i
     if diff_start is None:
         return out
-    # Extract the contiguous valid portion for the final WMA
     valid_diff = []
-    valid_map = []  # maps index in valid_diff -> index in original
+    valid_map = []
     for i in range(diff_start, n):
         if diff[i] is not None:
             valid_diff.append(diff[i])
             valid_map.append(i)
         else:
-            break  # stop at first gap (shouldn't happen for MA-derived series)
+            break
     if len(valid_diff) < sq:
         return out
     wma_final = _precompute_wma(valid_diff, sq)
@@ -145,7 +152,6 @@ def _precompute_hma(closes, period):
     return out
 
 def _precompute_ma(closes, ma_type, period):
-    """Dispatch to the correct O(n) precomputer."""
     t = ma_type.upper()
     if t == "SMA": return _precompute_sma(closes, period)
     if t == "EMA": return _precompute_ema(closes, period)
@@ -153,14 +159,12 @@ def _precompute_ma(closes, ma_type, period):
     if t == "HMA": return _precompute_hma(closes, period)
     return [None] * len(closes)
 
-# ── Cross-run cache (same dataset → skip recompute) ───────────────
+# ── Cross-run cache ───────────────────────────────────────────────
 _ma_cache = {}
 _ma_cache_dataset_id = None
 
 def _get_or_compute_ma(closes, ma_type, period, dataset_id=None):
-    """Return cached MA array or compute+cache it."""
     global _ma_cache, _ma_cache_dataset_id
-    # Invalidate cache if dataset changed
     if dataset_id is not None and dataset_id != _ma_cache_dataset_id:
         _ma_cache = {}
         _ma_cache_dataset_id = dataset_id
@@ -173,7 +177,7 @@ def _get_or_compute_ma(closes, ma_type, period, dataset_id=None):
     return _ma_cache[key]
 
 # ════════════════════════════════════════════════════════════════════
-#  INDICATOR ENGINE  (precomputed O(1) access per bar)
+#  INDICATOR ENGINE
 # ════════════════════════════════════════════════════════════════════
 class IndicatorEngine:
     def __init__(self, ma_type, period):
@@ -181,23 +185,19 @@ class IndicatorEngine:
         self.period  = int(period)
         self._precomputed = None
         self._idx = -1
-        # Fallback incremental state (only used if precompute not called)
         self.closes  = []
         self._ema_val = None
 
     def precompute(self, closes, dataset_id=None):
-        """Precompute the full MA array for O(1) lookups during simulation."""
         self._precomputed = _get_or_compute_ma(closes, self.ma_type, self.period, dataset_id)
         self._idx = -1
 
     def update(self, close):
-        # ── Fast path: precomputed O(1) lookup ──
         if self._precomputed is not None:
             self._idx += 1
             if self._idx < len(self._precomputed):
                 return self._precomputed[self._idx]
             return None
-        # ── Fallback: incremental computation ──
         self.closes.append(close)
         n = len(self.closes)
         if self.ma_type == "EMA":  return self._ema(close, n)
@@ -274,6 +274,84 @@ def calc_comm(cfg, contracts=1):
     return a
 
 # ════════════════════════════════════════════════════════════════════
+#  SPREAD GENERATOR
+#  - One spread per trade (generated at entry, reused at exit)
+#  - Direction-aware: always makes performance worse
+#  - Deterministic when seed is provided
+# ════════════════════════════════════════════════════════════════════
+class SpreadGenerator:
+    """Generates realistic random spread per trade."""
+
+    def __init__(self, config):
+        self.enabled = bool(config.get("enabled", False))
+        self.min_spread = float(config.get("min", 0.0))
+        self.max_spread = float(config.get("max", 0.0))
+
+        seed = config.get("seed")
+        if seed is not None and seed != "" and seed != 0:
+            self._rng = random.Random(int(seed))
+        else:
+            self._rng = random.Random()
+
+        if self.min_spread > self.max_spread:
+            self.min_spread, self.max_spread = self.max_spread, self.min_spread
+
+        if self.min_spread < 0:
+            self.min_spread = 0
+        if self.max_spread < 0:
+            self.max_spread = 0
+
+        if self.enabled:
+            print(f"  [SPREAD] Enabled: ${self.min_spread:.4f} - ${self.max_spread:.4f}"
+                  f"  seed={'deterministic' if seed else 'random'}")
+
+    def generate(self):
+        """Generate one spread value for a trade (call once at entry)."""
+        if not self.enabled or self.max_spread <= 0:
+            return 0.0
+        return self._rng.uniform(self.min_spread, self.max_spread)
+
+    def apply_entry(self, price, direction, spread):
+        """Worsen entry price by spread. Long=higher entry, Short=lower entry."""
+        if spread <= 0:
+            return price
+        half = spread / 2.0
+        if direction == "long":
+            return price + half   # buy at worse (higher) price
+        else:
+            return price - half   # sell at worse (lower) price
+
+    def apply_exit(self, price, direction, spread):
+        """Worsen exit price by spread. Long=lower exit, Short=higher exit."""
+        if spread <= 0:
+            return price
+        half = spread / 2.0
+        if direction == "long":
+            return price - half   # sell at worse (lower) price
+        else:
+            return price + half   # buy-to-cover at worse (higher) price
+
+    def apply_sl(self, sl_level, direction, spread):
+        """Worsen SL trigger. Long=SL triggers sooner (higher), Short=SL triggers sooner (lower)."""
+        if sl_level is None or spread <= 0:
+            return sl_level
+        half = spread / 2.0
+        if direction == "long":
+            return sl_level + half   # effective SL is higher (closer to entry)
+        else:
+            return sl_level - half   # effective SL is lower (closer to entry)
+
+    def apply_tp(self, tp_level, direction, spread):
+        """Worsen TP target. Long=TP further away (higher), Short=TP further away (lower)."""
+        if tp_level is None or spread <= 0:
+            return tp_level
+        half = spread / 2.0
+        if direction == "long":
+            return tp_level + half   # need price to go higher to actually fill TP
+        else:
+            return tp_level - half   # need price to go lower to actually fill TP
+
+# ════════════════════════════════════════════════════════════════════
 #  BACKTEST ENGINE
 # ════════════════════════════════════════════════════════════════════
 class BacktestEngine:
@@ -296,6 +374,9 @@ class BacktestEngine:
         self.sl_mode = self.sl_cfg.get("mode", "fixed")
         self.tp_mode = self.tp_cfg.get("mode", "r_multiple")
         self.gating_enabled = bool(self.gating_cfg.get("enabled", False))
+
+        # ── Spread generator ──────────────────────────────────────
+        self.spread_gen = SpreadGenerator(config.get("spread", {}))
 
         self.entry_ind = MultiIndicatorEngine(self.ma_defs)
 
@@ -321,9 +402,9 @@ class BacktestEngine:
         self.equity_curve = []
         self.dd_curve     = []
 
-        # ── Precompute ALL indicators for O(1) access ──────────
+        # ── Precompute ALL indicators ──────────────────────────
         closes = [b["close"] for b in self.bars]
-        dataset_id = id(self.bars)  # unique id for cache invalidation
+        dataset_id = id(self.bars)
         t0 = _time.perf_counter()
         self.entry_ind.precompute(closes, dataset_id)
         if self.sl_ma_eng:  self.sl_ma_eng.precompute(closes, dataset_id)
@@ -334,7 +415,7 @@ class BacktestEngine:
               f"SL={self.sl_mode} | TP={self.tp_mode} | "
               f"gating={self.gating_enabled} | "
               f"candle_confirm={self.require_candle_confirm} | "
-              f"lot={self.lot_size} | "
+              f"lot={self.lot_size} | spread={self.spread_gen.enabled} | "
               f"precompute={dt*1000:.1f}ms")
 
     def run(self):
@@ -361,12 +442,17 @@ class BacktestEngine:
         cum  = 0.0
         peak = self.starting_cap
         last_closed_pnl = None
+
         progress_interval = max(1, self.n // 100)
+        last_emit_time = _time.perf_counter()
+        EMIT_MIN_INTERVAL = 0.15
+
+        prev_sl_ma_val = None
 
         for i, bar in enumerate(self.bars):
             c = bar["close"]; o = bar["open"]; h = bar["high"]; l = bar["low"]
 
-            # ── Update ALL indicators (O(1) from precomputed) ───
+            # ── Update ALL indicators ───────────────────────────
             mv = self.entry_ind.update(c)
             ma_hist.append(mv)
             sl_ma_val = self.sl_ma_eng.update(c) if self.sl_ma_eng else None
@@ -379,10 +465,20 @@ class BacktestEngine:
                 direction = pending_signal
                 ep = o   # enter at THIS bar's open
 
-                sl_level, risk_pts = self._compute_sl(direction, ep, sl_ma_val)
+                sl_level, risk_pts = self._compute_sl(direction, ep, prev_sl_ma_val)
                 tp_level = self._compute_tp(direction, ep, risk_pts)
 
-                # ── VALIDATE: skip entry if risk is invalid ─────
+                # ── APPLY SPREAD ────────────────────────────────
+                trade_spread = self.spread_gen.generate()
+                ep = self.spread_gen.apply_entry(ep, direction, trade_spread)
+                sl_level = self.spread_gen.apply_sl(sl_level, direction, trade_spread)
+                tp_level = self.spread_gen.apply_tp(tp_level, direction, trade_spread)
+
+                # Recalculate risk after spread
+                if sl_level is not None:
+                    risk_pts = abs(ep - sl_level)
+
+                # ── VALIDATE ────────────────────────────────────
                 valid_entry = True
                 if risk_pts is None or risk_pts <= 0:
                     valid_entry = False
@@ -400,32 +496,39 @@ class BacktestEngine:
                 if valid_entry:
                     open_t = dict(
                         id=len(self.trades)+1, direction=direction,
-                        entry_bar=i, entry_time=bar["time"], entry_price=ep,
+                        entry_bar=i, entry_time=bar["time"], entry_price=round(ep, 4),
                         sl_level=sl_level, tp_level=tp_level,
                         risk_pts=risk_pts, mae=0.0, mfe=0.0, bars_held=0,
+                        spread=round(trade_spread, 4),
                     )
                     state = direction
                     just_entered = True
 
             pending_signal = None
 
-            # ── Manage open trade (skip exit on entry bar) ──────
+            # ── Manage open trade ───────────────────────────────
             if state != "flat" and open_t is not None and not just_entered:
                 closed = self._check_exit(open_t, bar, i, sl_ma_val, tp_ma_val)
                 if closed:
+                    # Apply spread to exit price
+                    trade_spread = closed.get("spread", 0.0)
+                    raw_exit = closed["exit_price"]
+                    closed["exit_price"] = round(
+                        self.spread_gen.apply_exit(raw_exit, closed["direction"], trade_spread), 4)
+
                     self._finalize_trade(closed)
                     cum += closed["net_pnl"]
                     closed["cumulative_pnl"] = round(cum, 2)
                     self.trades.append(closed)
                     last_closed_pnl = closed["net_pnl"]
 
-                    # Debug: print first few trades
                     if len(self.trades) <= 5:
                         t = closed
                         print(f"  [TRADE #{t['id']}] {t['direction'].upper()} "
                               f"entry={t['entry_price']} exit={t['exit_price']} "
                               f"SL={t.get('sl_level')} TP={t.get('tp_level')} "
                               f"risk={t.get('risk_pts')}pts "
+                              f"spread={t.get('spread',0):.4f} "
                               f"points={t.get('points_pnl')} "
                               f"R={t.get('net_pnl_r')} "
                               f"gross=${t.get('gross_pnl')} "
@@ -440,7 +543,7 @@ class BacktestEngine:
                     open_t = None
                     state = "flat"
 
-            # ── Update MAE/MFE on entry bar (no exit check) ─────
+            # ── Update MAE/MFE on entry bar ─────────────────────
             if state != "flat" and open_t is not None and just_entered:
                 d = open_t["direction"]; ep2 = open_t["entry_price"]
                 hh = bar["high"]; ll = bar["low"]
@@ -465,8 +568,15 @@ class BacktestEngine:
             dd = eq - peak
             self.dd_curve.append(round(dd, 2))
 
-            # ── Emit progress ───────────────────────────────────
-            if i % progress_interval == 0 or i == self.n - 1:
+            # ── Emit progress (throttled) ───────────────────────
+            now = _time.perf_counter()
+            should_emit = (
+                i == 0 or
+                i == self.n - 1 or
+                (i % progress_interval == 0 and (now - last_emit_time) >= EMIT_MIN_INTERVAL)
+            )
+            if should_emit:
+                last_emit_time = now
                 oi = None
                 if open_t:
                     oi = dict(direction=open_t["direction"],
@@ -478,7 +588,9 @@ class BacktestEngine:
                            equity=round(eq,2), drawdown=round(dd,2),
                            open_trade=oi, last_closed_pnl=last_closed_pnl)
 
-            # ── Signal detection (ONLY when FLAT, no pending) ───
+            prev_sl_ma_val = sl_ma_val
+
+            # ── Signal detection ────────────────────────────────
             if state != "flat" or pending_signal is not None:
                 continue
             if any(v is None for v in mv):
@@ -486,8 +598,8 @@ class BacktestEngine:
 
             ab = all(c > v for v in mv)
             bl = all(c < v for v in mv)
-            bull = c > o    # STRICT: close > open
-            bear = c < o    # STRICT: close < open
+            bull = c > o
+            bear = c < o
 
             if regime == "above" and not ab:
                 regime = "neutral"; bc = 0
@@ -511,10 +623,8 @@ class BacktestEngine:
             elif self.entry_mode == "ma_cross" and len(self.ma_defs) >= 2 and i > 0:
                 pm = ma_hist[i-1]
                 if None not in (mv[0], mv[1], pm[0], pm[1]):
-                    if pm[0] <= pm[1] and mv[0] > mv[1]:
-                        sig = "long"
-                    elif pm[0] >= pm[1] and mv[0] < mv[1]:
-                        sig = "short"
+                    if pm[0] <= pm[1] and mv[0] > mv[1]: sig = "long"
+                    elif pm[0] >= pm[1] and mv[0] < mv[1]: sig = "short"
 
             elif self.entry_mode == "trend_filter" and i > 0:
                 lm = mv[-1]; plm = ma_hist[i-1][-1]; pc = self.bars[i-1]["close"]
@@ -524,14 +634,12 @@ class BacktestEngine:
                     elif pc >= plm and c < lm and bear:
                         sig = "short"
 
-            # ── Entry candle direction confirmation (optional) ──
             if self.require_candle_confirm:
                 if sig == "long" and not bull:
                     sig = None
                 if sig == "short" and not bear:
                     sig = None
 
-            # ── Apply gating locks ──────────────────────────────
             if sig == "long"  and self.gating_enabled and long_locked:  sig = None
             if sig == "short" and self.gating_enabled and short_locked: sig = None
 
@@ -551,6 +659,10 @@ class BacktestEngine:
                       "exit_price": round(cp,2), "exit_reason": "end_of_data",
                       "holding_seconds": abs(lb["time"]-open_t["entry_time"]),
                       "bars_held": self.n-1-open_t["entry_bar"]}
+            # Apply spread to end-of-data exit
+            trade_spread = closed.get("spread", 0.0)
+            closed["exit_price"] = round(
+                self.spread_gen.apply_exit(closed["exit_price"], d, trade_spread), 4)
             self._finalize_trade(closed)
             cum += closed["net_pnl"]
             closed["cumulative_pnl"] = round(cum,2)
@@ -653,7 +765,6 @@ class BacktestEngine:
                 "bars_held": bi - t["entry_bar"]}
 
     def _finalize_trade(self, closed):
-        """Compute ALL trade metrics from first principles."""
         d = closed["direction"]
         ep = closed["entry_price"]
         xp = closed["exit_price"]
@@ -691,99 +802,24 @@ class BacktestEngine:
         )
 
     def _build_result(self):
-        max_dd = min(self.dd_curve) if self.dd_curve else 0
-        stats = self._stats(max_dd)
+        stats = compute_all_stats(
+            trades=self.trades,
+            equity_curve=self.equity_curve,
+            bars=self.bars,
+            starting_capital=self.starting_cap,
+            lot_size=self.lot_size,
+        )
+
         analytics = compute_analytics(self.trades, self.bars,
                                       self.equity_curve, self.dd_curve,
                                       self.starting_cap)
-        return dict(stats=stats, trades=self.trades,
-                    equity_curve=self.equity_curve,
-                    drawdown_curve=self.dd_curve,
-                    analytics=analytics)
 
-    def _stats(self, max_dd):
-        t = self.trades
-        if not t:
-            return dict(total_trades=0, total_bars_used=self.n, net_pnl=0,
-                        message="No trades", starting_capital=self.starting_cap,
-                        lot_size=self.lot_size, final_balance=self.starting_cap,
-                        net_profit_pct=0)
-        nets = [x["net_pnl"] for x in t]
-        wins = [x for x in t if x["net_pnl"] > 0]
-        losses = [x for x in t if x["net_pnl"] <= 0]
-        total = len(t); nw = len(wins); nl = len(losses)
-        wr = nw/total; net = sum(nets)
-        gross = sum(x["gross_pnl"] for x in t)
-        tc = sum(x["commission"] for x in t)
-        aw = sum(x["net_pnl"] for x in wins)/nw if wins else 0
-        al = sum(x["net_pnl"] for x in losses)/nl if losses else 0
-        gw = sum(x["net_pnl"] for x in wins)
-        gl = abs(sum(x["net_pnl"] for x in losses))
-        pf = gw/gl if gl else None
-        exp = (wr*aw)+((1-wr)*al)
-        final_balance = self.starting_cap + net
-        net_profit_pct = (net/self.starting_cap*100) if self.starting_cap else 0
-
-        sharpe=sortino=omega=sqn=None
-        if len(nets) > 1:
-            mu = sum(nets)/len(nets)
-            var = sum((x-mu)**2 for x in nets)/(len(nets)-1)
-            sd = math.sqrt(var) if var > 0 else 0
-            sharpe = (mu/sd)*math.sqrt(252) if sd else None
-            neg = [x for x in nets if x < 0]
-            dsd = math.sqrt(sum(x**2 for x in neg)/len(neg)) if neg else 0
-            sortino = (mu/dsd)*math.sqrt(252) if dsd else None
-            ps = sum(x for x in nets if x > 0)
-            ns = abs(sum(x for x in nets if x < 0))
-            omega = ps/ns if ns else None
-            sqn = (mu/sd)*math.sqrt(len(nets)) if sd else None
-
-        peak_eq = self.starting_cap + max((x["cumulative_pnl"] for x in t), default=0)
-        max_dd_pct = (max_dd/peak_eq*100) if peak_eq != 0 else 0
-        hs = [x.get("holding_seconds",0) for x in t if x.get("holding_seconds")]
-        avg_hold_s = sum(hs)/len(hs) if hs else 0
-        bl = [x.get("bars_held",0) for x in t]
-        avg_hold_b = sum(bl)/len(bl) if bl else 0
-        mw=ml_=cw=cl_=0
-        for tr in t:
-            if tr["net_pnl"] > 0: cw += 1; cl_ = 0
-            else: cl_ += 1; cw = 0
-            mw = max(mw,cw); ml_ = max(ml_,cl_)
-        rf = abs(net/max_dd) if max_dd else None
-        calmar = abs(net/max_dd)*12 if max_dd else None
-        ulcer = math.sqrt(sum(x**2 for x in self.dd_curve)/len(self.dd_curve)) if self.dd_curve else 0
-        dd_dur=0; cur_dur=0
-        for x in self.dd_curve:
-            if x < 0: cur_dur += 1; dd_dur = max(dd_dur,cur_dur)
-            else: cur_dur = 0
-        r_vals = [x.get("net_pnl_r") for x in t if x.get("net_pnl_r") is not None]
-        exp_r = sum(r_vals)/len(r_vals) if r_vals else None
-        try:
-            d0 = datetime.fromtimestamp(self.bars[0]["time"],tz=timezone.utc).strftime("%Y-%m-%d")
-            d1 = datetime.fromtimestamp(self.bars[-1]["time"],tz=timezone.utc).strftime("%Y-%m-%d")
-            dr = f"{d0} \u2192 {d1}"
-        except: dr = ""
         return dict(
-            total_trades=total, winning_trades=nw, losing_trades=nl,
-            win_rate=round(wr,4), net_pnl=round(net,2), gross_pnl=round(gross,2),
-            total_commission=round(tc,2), avg_win=round(aw,2), avg_loss=round(al,2),
-            largest_win=round(max((x["net_pnl"] for x in wins),default=0),2),
-            largest_loss=round(min((x["net_pnl"] for x in losses),default=0),2),
-            profit_factor=round(pf,4) if pf else None, expectancy=round(exp,2),
-            expectancy_r=round(exp_r,3) if exp_r is not None else None,
-            sharpe=round(sharpe,4) if sharpe else None,
-            sortino=round(sortino,4) if sortino else None,
-            omega=round(omega,4) if omega else None,
-            sqn=round(sqn,4) if sqn else None,
-            max_drawdown=round(max_dd,2), max_drawdown_pct=round(max_dd_pct,2),
-            drawdown_duration_bars=dd_dur, ulcer_index=round(ulcer,4),
-            recovery_factor=round(rf,4) if rf else None,
-            calmar_ratio=round(calmar,4) if calmar else None,
-            avg_holding_seconds=round(avg_hold_s,1), avg_holding_bars=round(avg_hold_b,2),
-            max_consec_wins=mw, max_consec_losses=ml_,
-            total_bars_used=self.n, date_range=dr,
-            starting_capital=self.starting_cap, lot_size=self.lot_size,
-            final_balance=round(final_balance,2), net_profit_pct=round(net_profit_pct,2),
+            stats=stats,
+            trades=self.trades,
+            equity_curve=ds_curve(self.equity_curve, 1500),
+            drawdown_curve=ds_curve(self.dd_curve, 1500),
+            analytics=analytics,
         )
 
 # ════════════════════════════════════════════════════════════════════
@@ -882,7 +918,7 @@ def compute_analytics(trades, bars, equity_curve, dd_curve, starting_cap=10000):
         sim_finals.append(round(cum_mc, 2))
         sim_max_dds.append(round(max_dd_s, 2))
         if sim_i < 100:
-            mc_paths_sample.append(cum_path)
+            mc_paths_sample.append(ds_curve(cum_path, 500))
     sim_finals.sort(); sim_max_dds.sort()
     def pct(arr,p): idx=int(len(arr)*p/100); return arr[min(idx,len(arr)-1)]
 
@@ -942,8 +978,48 @@ def _validate_and_load(cfg):
     if not cfg: raise ValueError("Empty body")
     mas = cfg.get("mas",[])
     if not mas: raise ValueError("Need at least one MA")
-    bars = load_bars(int(cfg.get("range",10)), int(cfg.get("bar_range",1000)))
-    if len(bars) < 10: raise ValueError("Insufficient data")
+
+    bars = load_bars(
+        int(cfg.get("range",10)),
+        int(cfg.get("bar_range",1000)),
+        start_date=cfg.get("start_date"),
+        end_date=cfg.get("end_date"),
+    )
+
+    max_period = 0
+    for m in mas:
+        p = int(m.get("period", 0))
+        if p > max_period:
+            max_period = p
+
+    sl_cfg = cfg.get("sl", {})
+    if sl_cfg.get("mode") in ("ma_cross", "ma_snapshot"):
+        sp = int(sl_cfg.get("ma_length", 50))
+        if sp > max_period:
+            max_period = sp
+
+    tp_cfg = cfg.get("tp", {})
+    if tp_cfg.get("mode") == "ma_cross":
+        tp = int(tp_cfg.get("ma_length", 9))
+        if tp > max_period:
+            max_period = tp
+
+    gating_cfg = cfg.get("gating", {})
+    if gating_cfg.get("enabled"):
+        gp = int(gating_cfg.get("ma_length", 21))
+        if gp > max_period:
+            max_period = gp
+
+    min_bars = max_period + int(math.sqrt(max(max_period, 1))) + 2
+    min_bars = max(min_bars, 5)
+
+    if len(bars) < min_bars:
+        raise ValueError(
+            f"Need at least {min_bars} bars for these indicators "
+            f"(longest MA period = {max_period}), but only {len(bars)} bars available. "
+            f"Try a larger date range or lower bar count."
+        )
+
     return bars, cfg
 
 def _clean(obj):

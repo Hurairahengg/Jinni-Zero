@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import math
 import random
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from backend.stats_engine import compute_all_stats, downsample_curve as ds_curve
 
 
 # ============================================================
@@ -24,30 +28,26 @@ def safe_float(v, default=0.0):
         return default
 
 
-def downsample_curve(values: List[float], max_points: int = 500) -> List[float]:
-    if not values:
-        return []
-    if len(values) <= max_points:
-        return values[:]
-
-    bucket = len(values) / max_points
-    out = [values[0]]
-
-    for b in range(1, max_points - 1):
-        start = int(math.floor(b * bucket))
-        end = int(math.floor((b + 1) * bucket))
-        start = max(0, start)
-        end = min(len(values), end)
-
-        if start >= end:
+def _parse_datetime_param(val):
+    """Convert ISO datetime string (from HTML datetime-local input) to Unix
+    timestamp.  Treats naive datetimes as UTC.  Returns None if invalid."""
+    if not val or not isinstance(val, str) or not val.strip():
+        return None
+    val = val.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(val, fmt)
+            dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except ValueError:
             continue
+    return None
 
-        chunk = values[start:end]
-        out.append(min(chunk))
-        out.append(max(chunk))
 
-    out.append(values[-1])
-    return out[:max_points]
+def downsample_curve(values: List[float], max_points: int = 500) -> List:
+    """Local wrapper — delegates to stats_engine.downsample_curve."""
+    return ds_curve(values, max_points)
 
 
 # ============================================================
@@ -196,9 +196,9 @@ def _precompute_true_range(bars):
         high_ = safe_float(b["high"])
         low_ = safe_float(b["low"])
         if prev_close is None:
-          tr = high_ - low_
+            tr = high_ - low_
         else:
-          tr = max(high_ - low_, abs(high_ - prev_close), abs(low_ - prev_close))
+            tr = max(high_ - low_, abs(high_ - prev_close), abs(low_ - prev_close))
         out[i] = tr
         prev_close = safe_float(b["close"])
     return out
@@ -598,6 +598,7 @@ def record_trade_slice(position: Position, bar: dict, exit_price: float, exit_re
         "stop_loss": position.stop_loss,
         "take_profit": position.take_profit,
         "bars_held": max(0, int(bar["index"]) - position.entry_index),
+        "holding_seconds": abs(int(bar["time"]) - int(position.entry_time)),
         "gross_pnl": gross_pnl,
         "commission": commission,
         "net_pnl": net_pnl,
@@ -610,7 +611,7 @@ def record_trade_slice(position: Position, bar: dict, exit_price: float, exit_re
 
 
 # ============================================================
-# Metrics / Monte Carlo
+# Monte Carlo (kept local — only strategy engine uses it inline)
 # ============================================================
 def monte_carlo_summary(trades: List[dict], starting_capital: float, runs: int):
     runs = int(max(0, runs or 0))
@@ -660,7 +661,7 @@ def monte_carlo_summary(trades: List[dict], starting_capital: float, runs: int):
         finals.append(eq)
         dds.append(max_dd)
         if len(paths_sample) < 100:
-            paths_sample.append(path)
+            paths_sample.append(ds_curve(path, 500))
 
     def make_hist(data, bins=24):
         if not data:
@@ -701,115 +702,6 @@ def monte_carlo_summary(trades: List[dict], starting_capital: float, runs: int):
         "prob_dd_10": (dd10 / runs) * 100 if runs else None,
         "prob_dd_20": (dd20 / runs) * 100 if runs else None,
         "prob_dd_30": (dd30 / runs) * 100 if runs else None,
-    }
-
-
-def compute_metrics(trades: List[dict], balance_curve: List[float], equity_curve: List[float], drawdown_curve: List[float], starting_capital: float, bars: List[dict]):
-    total_trades = len(trades)
-    wins = [t for t in trades if safe_float(t["net_pnl"]) > 0]
-    losses = [t for t in trades if safe_float(t["net_pnl"]) <= 0]
-
-    net_pnl = sum(safe_float(t["net_pnl"]) for t in trades)
-    gross_profit = sum(safe_float(t["net_pnl"]) for t in wins)
-    gross_loss_abs = abs(sum(safe_float(t["net_pnl"]) for t in losses))
-
-    profit_factor = (gross_profit / gross_loss_abs) if gross_loss_abs > 0 else None
-    win_rate = (len(wins) / total_trades) if total_trades else 0.0
-
-    expectancy = (net_pnl / total_trades) if total_trades else 0.0
-    avg_win = (sum(safe_float(t["net_pnl"]) for t in wins) / len(wins)) if wins else 0.0
-    avg_loss = (sum(safe_float(t["net_pnl"]) for t in losses) / len(losses)) if losses else 0.0
-
-    largest_win = max((safe_float(t["net_pnl"]) for t in wins), default=0.0)
-    largest_loss = min((safe_float(t["net_pnl"]) for t in losses), default=0.0)
-
-    max_consec_wins = 0
-    max_consec_losses = 0
-    cur_w = 0
-    cur_l = 0
-    for t in trades:
-        if safe_float(t["net_pnl"]) > 0:
-            cur_w += 1
-            cur_l = 0
-        else:
-            cur_l += 1
-            cur_w = 0
-        max_consec_wins = max(max_consec_wins, cur_w)
-        max_consec_losses = max(max_consec_losses, cur_l)
-
-    final_balance = balance_curve[-1] if balance_curve else starting_capital
-    final_equity = equity_curve[-1] if equity_curve else starting_capital
-    max_drawdown = max(drawdown_curve) if drawdown_curve else 0.0
-    max_drawdown_pct = ((max_drawdown / starting_capital) * 100.0) if starting_capital else 0.0
-
-    # Equity-curve Sharpe
-    returns = []
-    prev = None
-    for v in equity_curve:
-        if prev is not None and prev != 0:
-            returns.append((v - prev) / prev)
-        prev = v
-
-    sharpe = None
-    if returns:
-        mean_r = sum(returns) / len(returns)
-        var = sum((r - mean_r) ** 2 for r in returns) / max(1, len(returns) - 1)
-        std = math.sqrt(var)
-        if std > 0:
-            sharpe = mean_r / std
-
-    # SQN using R-multiples
-    r_vals = [safe_float(t.get("net_pnl_r"), None) for t in trades if t.get("net_pnl_r") is not None]
-    sqn = None
-    if len(r_vals) >= 2:
-        mean_r = sum(r_vals) / len(r_vals)
-        var_r = sum((r - mean_r) ** 2 for r in r_vals) / max(1, len(r_vals) - 1)
-        std_r = math.sqrt(var_r)
-        if std_r > 0:
-            sqn = (mean_r / std_r) * math.sqrt(len(r_vals))
-
-    # Omega ratio
-    threshold = 0.0
-    omega = None
-    if trades:
-        gains = 0.0
-        losses_amt = 0.0
-        for t in trades:
-            pnl = safe_float(t.get("net_pnl"), 0.0)
-            excess = pnl - threshold
-            if excess >= 0:
-                gains += excess
-            else:
-                losses_amt += abs(excess)
-        if losses_amt > 0:
-            omega = gains / losses_amt
-        elif gains > 0:
-            omega = float("inf")
-
-    return {
-        "starting_capital": starting_capital,
-        "final_balance": final_balance,
-        "final_equity": final_equity,
-        "net_pnl": net_pnl,
-        "net_profit_pct": ((final_balance - starting_capital) / starting_capital * 100.0) if starting_capital else 0.0,
-        "total_trades": total_trades,
-        "winning_trades": len(wins),
-        "losing_trades": len(losses),
-        "win_rate": win_rate,
-        "profit_factor": profit_factor,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
-        "largest_win": largest_win,
-        "largest_loss": largest_loss,
-        "expectancy": expectancy,
-        "max_drawdown": max_drawdown,
-        "max_drawdown_pct": max_drawdown_pct,
-        "max_consec_wins": max_consec_wins,
-        "max_consec_losses": max_consec_losses,
-        "sharpe": sharpe,
-        "sqn": sqn,
-        "omega": omega,
-        "total_bars_used": len(bars),
     }
 
 
@@ -1024,7 +916,7 @@ class BacktestEngine:
             return
         self._partial_close(bar, self.position.size, exit_price, exit_reason)
 
-    def _build_analytics_payload(self, metrics):
+    def _build_analytics_payload(self):
         trades = self.trades
         r_vals = [safe_float(t.get("net_pnl_r"), 0.0) for t in trades]
         dur_vals = [safe_float(t.get("bars_held"), 0.0) for t in trades]
@@ -1161,16 +1053,22 @@ class BacktestEngine:
                 self.peak_equity = max(self.peak_equity, self.balance)
                 self.drawdown_curve[-1] = self.peak_equity - self.balance
 
-        metrics = compute_metrics(
-            trades=self.trades,
-            balance_curve=self.balance_curve,
-            equity_curve=self.equity_curve,
-            drawdown_curve=self.drawdown_curve,
-            starting_capital=self.starting_capital,
-            bars=self.bars,
+        # ── Use centralized stats engine ───────────────────────
+        lot_size_val = safe_float(
+            self.payload.get("lot_size",
+                self.engine_cfg.get("position_sizing", {}).get("fixed_lot", 1.0)),
+            1.0
         )
 
-        analytics = self._build_analytics_payload(metrics)
+        metrics = compute_all_stats(
+            trades=self.trades,
+            equity_curve=self.equity_curve,
+            bars=self.bars,
+            starting_capital=self.starting_capital,
+            lot_size=lot_size_val,
+        )
+
+        analytics = self._build_analytics_payload()
 
         return {
             "strategy": self.strategy.get_metadata(),
@@ -1187,15 +1085,15 @@ class BacktestEngine:
             "trades": self.trades,
             "curves": {
                 "balance_full": self.balance_curve,
-                "balance_downsampled": downsample_curve(self.balance_curve),
+                "balance_downsampled": ds_curve(self.balance_curve, 1500),
                 "equity_full": self.equity_curve,
-                "equity_downsampled": downsample_curve(self.equity_curve),
+                "equity_downsampled": ds_curve(self.equity_curve, 1500),
                 "drawdown_full": self.drawdown_curve,
-                "drawdown_downsampled": downsample_curve(self.drawdown_curve),
+                "drawdown_downsampled": ds_curve(self.drawdown_curve, 1500),
             },
             "metrics": metrics,
             "analytics": analytics,
-            "equity_curve": self.equity_curve,
-            "drawdown_curve": self.drawdown_curve,
+            "equity_curve": ds_curve(self.equity_curve, 1500),
+            "drawdown_curve": ds_curve(self.drawdown_curve, 1500),
             "stats": metrics,
         }

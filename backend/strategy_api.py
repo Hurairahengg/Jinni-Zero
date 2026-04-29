@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from copy import deepcopy
+from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request
 
@@ -16,9 +17,29 @@ DATA_DIR = "data"
 
 
 # ============================================================
+# Datetime helper
+# ============================================================
+def _parse_datetime_param(val):
+    """Convert ISO datetime string (from HTML datetime-local input) to Unix
+    timestamp.  Treats naive datetimes as UTC.  Returns None if invalid."""
+    if not val or not isinstance(val, str) or not val.strip():
+        return None
+    val = val.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(val, fmt)
+            dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except ValueError:
+            continue
+    return None
+
+
+# ============================================================
 # Data loading
 # ============================================================
-def load_bars(range_pt: int, bar_range: int):
+def load_bars(range_pt: int, bar_range: int, start_date=None, end_date=None):
     path = os.path.join(DATA_DIR, f"{int(range_pt)}pt.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Dataset not found: {path}")
@@ -26,6 +47,19 @@ def load_bars(range_pt: int, bar_range: int):
     with open(path, "r", encoding="utf-8") as f:
         bars = json.load(f)
 
+    # ── Date-range filtering (BEFORE normalization) ────────────
+    start_ts = _parse_datetime_param(start_date)
+    end_ts = _parse_datetime_param(end_date)
+    if start_ts is not None or end_ts is not None:
+        before_filter = len(bars)
+        if start_ts is not None:
+            bars = [b for b in bars if int(b["time"]) >= start_ts]
+        if end_ts is not None:
+            bars = [b for b in bars if int(b["time"]) <= end_ts]
+        print(f"  [DATA] Date filter: {before_filter} → {len(bars)} bars"
+              f"  (start={start_date}, end={end_date})")
+
+    # ── Bar-count limit (applied AFTER date filter) ────────────
     if bar_range and int(bar_range) > 0:
         bars = bars[-int(bar_range):]
 
@@ -282,6 +316,8 @@ def strategy_backtest_run():
         bars = load_bars(
             range_pt=int(payload.get("range", 10)),
             bar_range=int(payload.get("bar_range", 1000)),
+            start_date=payload.get("start_date"),
+            end_date=payload.get("end_date"),
         )
 
         if len(bars) < 10:

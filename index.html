@@ -134,14 +134,35 @@
           </div>
 
           <div class="bt-field">
-            <label class="bt-label">Backtest Range</label>
-            <select class="bt-select" id="bt_barRange">
-              <option value="500">Last 500 bars</option>
-              <option value="1000" selected>Last 1000 bars</option>
-              <option value="2500">Last 2500 bars</option>
-              <option value="5000">Last 5000 bars</option>
-              <option value="0">Full dataset</option>
+            <label class="bt-label">Data Slicing</label>
+            <select class="bt-select" id="bt_sliceMode">
+              <option value="bar_count" selected>Bar Count</option>
+              <option value="date_range">Date Range</option>
             </select>
+          </div>
+
+          <div id="bt_barRangeWrap">
+            <div class="bt-field">
+              <label class="bt-label">Backtest Range</label>
+              <select class="bt-select" id="bt_barRange">
+                <option value="500">Last 500 bars</option>
+                <option value="1000" selected>Last 1000 bars</option>
+                <option value="2500">Last 2500 bars</option>
+                <option value="5000">Last 5000 bars</option>
+                <option value="0">Full dataset</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="bt_dateRangeWrap" style="display:none;">
+            <div class="bt-field">
+              <label class="bt-label">Start Date</label>
+              <input type="datetime-local" class="bt-input" id="bt_startDate"/>
+            </div>
+            <div class="bt-field">
+              <label class="bt-label">End Date</label>
+              <input type="datetime-local" class="bt-input" id="bt_endDate"/>
+            </div>
           </div>
 
           <div class="bt-field">
@@ -315,7 +336,34 @@
             <input class="bt-input" type="number" id="bt_commission" value="4.00" min="0" step="0.5"/>
           </div>
         </div>
+        <!-- SPREAD SIMULATION -->
+        <div class="bt-section bt-manual-only">
+          <div class="bt-section-title">SPREAD SIMULATION</div>
+          <div class="bt-field">
+            <label class="bt-label">Random Spread</label>
+            <div class="bt-toggle-row">
+              <label class="bt-toggle"><input type="checkbox" id="bt_spreadEnabled"/><span class="bt-toggle-slider"></span></label>
+              <span class="bt-toggle-label">Apply random spread per trade (realistic slippage)</span>
+            </div>
+          </div>
 
+          <div id="bt_spreadWrap" style="display:none;">
+            <div class="bt-field">
+              <label class="bt-label">Min Spread ($)</label>
+              <input class="bt-input" type="number" id="bt_spreadMin" value="0.10" min="0" step="0.01"/>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">Max Spread ($)</label>
+              <input class="bt-input" type="number" id="bt_spreadMax" value="0.50" min="0" step="0.01"/>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">Seed (0 = random)</label>
+              <input class="bt-input" type="number" id="bt_spreadSeed" value="0" min="0" step="1"/>
+            </div>
+          </div>
+        </div>
         <!-- STRATEGY MODE ONLY -->
         <div id="bt_strategyPanel" style="display:none;">
           <div class="bt-section">
@@ -404,6 +452,12 @@
           <div class="bt-dash-section"><div class="bt-dash-section-title">CORE STATISTICS</div><div class="bt-kpi-grid" id="bd_coreKpis"></div></div>
           <div class="bt-dash-section"><div class="bt-dash-section-title">RISK METRICS</div><div class="bt-kpi-grid" id="bd_riskKpis"></div></div>
           <div class="bt-dash-section"><div class="bt-dash-section-title">PERFORMANCE RATIOS</div><div class="bt-kpi-grid" id="bd_ratioKpis"></div></div>
+
+          <!-- ── NEW PRO STAT SECTIONS ─────────────────────────── -->
+          <div class="bt-dash-section"><div class="bt-dash-section-title">TRADE ANALYSIS</div><div class="bt-kpi-grid" id="bd_tradeKpis"></div></div>
+          <div class="bt-dash-section"><div class="bt-dash-section-title">TIME &amp; EXPOSURE</div><div class="bt-kpi-grid" id="bd_timeExpKpis"></div></div>
+          <div class="bt-dash-section"><div class="bt-dash-section-title">PERIOD PERFORMANCE</div><div class="bt-kpi-grid" id="bd_periodKpis"></div></div>
+          <div class="bt-dash-section"><div class="bt-dash-section-title">MAE / MFE</div><div class="bt-kpi-grid" id="bd_maeMfeKpis"></div></div>
 
           <div class="bt-dash-section"><div class="bt-dash-section-title">EQUITY CURVE</div><div class="bt-chart-card"><canvas id="cv_equity" class="bt-canvas"></canvas></div></div>
           <div class="bt-dash-section"><div class="bt-dash-section-title">DRAWDOWN CURVE</div><div class="bt-chart-card"><canvas id="cv_drawdown" class="bt-canvas"></canvas></div></div>
