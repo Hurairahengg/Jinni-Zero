@@ -2,96 +2,170 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from copy import deepcopy
+from typing import Any, Dict, List, Optional
 
 
 class BaseStrategy(ABC):
-    strategy_id = ""
-    name = "Unnamed Strategy"
-    description = ""
-    parameters = {}
-    indicators_required = []
+    """
+    JINNI ZERO — Strategy Base Class
+    --------------------------------
+    The STRATEGY is the brain.
+    The ENGINE is a dumb broker simulator.
 
-    # Engine behavior defaults
-    allow_stacking = False
+    A strategy:
+      • decides WHEN to enter / exit
+      • decides SL / TP placement and updates
+      • decides position size
+      • manages its own state
+    """
 
-    def get_metadata(self):
+    # ── REQUIRED METADATA ─────────────────────────────────────
+    strategy_id: str = ""
+    name: str = ""
+    description: str = ""
+    version: str = "1.0"
+
+    # ==========================================================
+    # METADATA / PARAMETERS
+    # ==========================================================
+    def get_metadata(self) -> Dict[str, Any]:
+        """
+        Returns strategy metadata and parameter schema.
+
+        MUST return:
+          {
+            id: str,
+            name: str,
+            description: str,
+            version: str,
+            parameters: dict   # schema for THIS strategy only
+          }
+        """
         return {
             "id": self.strategy_id,
-            "name": self.name,
-            "description": self.description,
-            "parameters": deepcopy(self.parameters),
-            "indicators_required": deepcopy(self.indicators_required),
-            "allow_stacking": bool(self.allow_stacking),
+            "name": self.name or self.strategy_id,
+            "description": self.description or "",
+            "version": self.version,
+            "parameters": self.get_parameter_schema(),
         }
 
-    def get_default_parameters(self):
+    def get_parameter_schema(self) -> Dict[str, Any]:
+        """
+        Returns a schema dict defining strategy-specific parameters.
+
+        Schema format is consumed directly by the frontend UI.
+        Engine parameters MUST NOT appear here.
+
+        Override in strategy if params are needed.
+        """
+        return getattr(self, 'parameters', {})
+
+    def get_default_parameters(self) -> Dict[str, Any]:
+        """
+        Returns default values for strategy parameters.
+        Keys must match get_parameter_schema().
+        """
+        schema = self.get_parameter_schema()
         defaults = {}
-        for key, spec in self.parameters.items():
-            if spec.get("type") == "group":
-                continue
-            defaults[key] = spec.get("default")
+        for k, spec in schema.items():
+            if isinstance(spec, dict) and 'default' in spec:
+                defaults[k] = spec['default']
         return defaults
 
-    def validate_parameters(self, raw_params: dict | None):
-        raw_params = raw_params or {}
-        merged = self.get_default_parameters()
-
-        for key, spec in self.parameters.items():
-            if spec.get("type") == "group":
-                continue
-
-            value = raw_params.get(key, spec.get("default"))
-            ptype = spec.get("type", "string")
-
-            if ptype == "number":
-                if value is None or value == "":
-                    value = spec.get("default", 0)
-                value = float(value)
-                if "min" in spec:
-                    value = max(float(spec["min"]), value)
-                if "max" in spec:
-                    value = min(float(spec["max"]), value)
-                if spec.get("integer", False):
-                    value = int(round(value))
-
-            elif ptype == "boolean":
-                value = bool(value)
-
-            elif ptype == "enum":
-                options = spec.get("options", [])
-                if value not in options:
-                    value = spec.get("default", options[0] if options else None)
-
-            else:
-                value = "" if value is None else str(value)
-
-            merged[key] = value
-
-        return merged
-
-    def build_indicators_required(self, params: dict):
-        resolved = []
-        for item in self.indicators_required:
-            row = deepcopy(item)
-            if "period_param" in row:
-                row["period"] = int(params[row["period_param"]])
-            resolved.append(row)
-        return resolved
-
-    def engine_parameter_overrides(self, params: dict):
+    def validate_parameters(self, raw_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Optional hook.
-        A strategy can override engine behavior defaults if needed.
-        Example:
-            return {
-                "exits": {
-                    "trailing": {"enabled": True, "mode": "ma", "ma_key": "fast_ema"}
-                }
-            }
-        """
-        return {}
+        Validate / clamp / coerce incoming parameters.
 
+        Must return a CLEAN dict used by the engine.
+        Default behavior: merge defaults with raw input.
+        """
+        params = dict(self.get_default_parameters())
+        for k, v in (raw_params or {}).items():
+            params[k] = v
+        return params
+
+    # ==========================================================
+    # INDICATORS
+    # ==========================================================
+    def build_indicators(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Return indicator specs to be precomputed by the engine.
+
+        Each spec:
+          {
+            key: "ema_55",
+            kind: "EMA" | "SMA" | "WMA" | "HMA" | "VWAP" | "CHOPPINESS" | etc,
+            period: int,
+            source: "close" | "open" | "high" | "low"
+          }
+
+        Override if indicators are needed.
+        """
+        return []
+
+    # ==========================================================
+    # LIFECYCLE HOOKS
+    # ==========================================================
+    def on_init(self, ctx: Any) -> None:
+        """
+        Called ONCE before the first bar.
+        Strategy may initialize ctx.state here.
+        """
+        pass
+
+    def on_end(self, ctx: Any) -> None:
+        """
+        Called ONCE after the final bar.
+        """
+        pass
+
+    # ==========================================================
+    # MAIN STRATEGY LOGIC
+    # ==========================================================
     @abstractmethod
-    def on_bar(self, i, bar, indicators, state, position, bars, params):
-        raise NotImplementedError
+    def on_bar(self, ctx: Any) -> Optional[Dict[str, Any]]:
+        """
+        Called once per bar.
+
+        ctx provides:
+          ctx.index
+          ctx.bar
+          ctx.bars
+          ctx.indicators
+          ctx.ind_series
+          ctx.position
+          ctx.balance
+          ctx.equity
+          ctx.trades
+          ctx.params
+          ctx.state   ← mutable dict, persists across bars
+
+        Return one of:
+
+        ENTER:
+          {
+            "enter": "long" | "short",
+            "size": float | None,
+            "stop_loss": float | None,
+            "take_profit": float | None,
+            "entry_price": float | None,
+            "reason": str | None
+          }
+
+        EXIT:
+          {
+            "exit": True,
+            "exit_price": float | None,
+            "reason": str | None
+          }
+
+        UPDATE:
+          {
+            "update_sl": float | None,
+            "update_tp": float | None
+          }
+
+        NOTHING:
+          {} or None
+        """
+        raise NotImplementedError("Strategy must implement on_bar()")

@@ -275,9 +275,6 @@ def calc_comm(cfg, contracts=1):
 
 # ════════════════════════════════════════════════════════════════════
 #  SPREAD GENERATOR
-#  - One spread per trade (generated at entry, reused at exit)
-#  - Direction-aware: always makes performance worse
-#  - Deterministic when seed is provided
 # ════════════════════════════════════════════════════════════════════
 class SpreadGenerator:
     """Generates realistic random spread per trade."""
@@ -306,50 +303,45 @@ class SpreadGenerator:
                   f"  seed={'deterministic' if seed else 'random'}")
 
     def generate(self):
-        """Generate one spread value for a trade (call once at entry)."""
         if not self.enabled or self.max_spread <= 0:
             return 0.0
         return self._rng.uniform(self.min_spread, self.max_spread)
 
     def apply_entry(self, price, direction, spread):
-        """Worsen entry price by spread. Long=higher entry, Short=lower entry."""
         if spread <= 0:
             return price
         half = spread / 2.0
         if direction == "long":
-            return price + half   # buy at worse (higher) price
+            return price + half
         else:
-            return price - half   # sell at worse (lower) price
+            return price - half
 
     def apply_exit(self, price, direction, spread):
-        """Worsen exit price by spread. Long=lower exit, Short=higher exit."""
         if spread <= 0:
             return price
         half = spread / 2.0
         if direction == "long":
-            return price - half   # sell at worse (lower) price
+            return price - half
         else:
-            return price + half   # buy-to-cover at worse (higher) price
+            return price + half
 
     def apply_sl(self, sl_level, direction, spread):
-        """Worsen SL trigger. Long=SL triggers sooner (higher), Short=SL triggers sooner (lower)."""
         if sl_level is None or spread <= 0:
             return sl_level
         half = spread / 2.0
         if direction == "long":
-            return sl_level + half   # effective SL is higher (closer to entry)
+            return sl_level + half
         else:
-            return sl_level - half   # effective SL is lower (closer to entry)
+            return sl_level - half
 
     def apply_tp(self, tp_level, direction, spread):
-        """Worsen TP target. Long=TP further away (higher), Short=TP further away (lower)."""
         if tp_level is None or spread <= 0:
             return tp_level
         half = spread / 2.0
         if direction == "long":
-            return tp_level + half   # need price to go higher to actually fill TP
+            return tp_level + half
         else:
-            return tp_level - half   # need price to go lower to actually fill TP
+            return tp_level - half
 
 # ════════════════════════════════════════════════════════════════════
 #  BACKTEST ENGINE
@@ -375,7 +367,6 @@ class BacktestEngine:
         self.tp_mode = self.tp_cfg.get("mode", "r_multiple")
         self.gating_enabled = bool(self.gating_cfg.get("enabled", False))
 
-        # ── Spread generator ──────────────────────────────────────
         self.spread_gen = SpreadGenerator(config.get("spread", {}))
 
         self.entry_ind = MultiIndicatorEngine(self.ma_defs)
@@ -402,7 +393,6 @@ class BacktestEngine:
         self.equity_curve = []
         self.dd_curve     = []
 
-        # ── Precompute ALL indicators ──────────────────────────
         closes = [b["close"] for b in self.bars]
         dataset_id = id(self.bars)
         t0 = _time.perf_counter()
@@ -452,33 +442,28 @@ class BacktestEngine:
         for i, bar in enumerate(self.bars):
             c = bar["close"]; o = bar["open"]; h = bar["high"]; l = bar["low"]
 
-            # ── Update ALL indicators ───────────────────────────
             mv = self.entry_ind.update(c)
             ma_hist.append(mv)
             sl_ma_val = self.sl_ma_eng.update(c) if self.sl_ma_eng else None
             tp_ma_val = self.tp_ma_eng.update(c) if self.tp_ma_eng else None
             gating_val = self.gating_eng.update(c) if self.gating_eng else None
 
-            # ── Execute pending entry at this bar's open ────────
             just_entered = False
             if pending_signal is not None and state == "flat":
                 direction = pending_signal
-                ep = o   # enter at THIS bar's open
+                ep = o
 
                 sl_level, risk_pts = self._compute_sl(direction, ep, prev_sl_ma_val)
                 tp_level = self._compute_tp(direction, ep, risk_pts)
 
-                # ── APPLY SPREAD ────────────────────────────────
                 trade_spread = self.spread_gen.generate()
                 ep = self.spread_gen.apply_entry(ep, direction, trade_spread)
                 sl_level = self.spread_gen.apply_sl(sl_level, direction, trade_spread)
                 tp_level = self.spread_gen.apply_tp(tp_level, direction, trade_spread)
 
-                # Recalculate risk after spread
                 if sl_level is not None:
                     risk_pts = abs(ep - sl_level)
 
-                # ── VALIDATE ────────────────────────────────────
                 valid_entry = True
                 if risk_pts is None or risk_pts <= 0:
                     valid_entry = False
@@ -506,11 +491,9 @@ class BacktestEngine:
 
             pending_signal = None
 
-            # ── Manage open trade ───────────────────────────────
             if state != "flat" and open_t is not None and not just_entered:
                 closed = self._check_exit(open_t, bar, i, sl_ma_val, tp_ma_val)
                 if closed:
-                    # Apply spread to exit price
                     trade_spread = closed.get("spread", 0.0)
                     raw_exit = closed["exit_price"]
                     closed["exit_price"] = round(
@@ -543,19 +526,16 @@ class BacktestEngine:
                     open_t = None
                     state = "flat"
 
-            # ── Update MAE/MFE on entry bar ─────────────────────
             if state != "flat" and open_t is not None and just_entered:
                 d = open_t["direction"]; ep2 = open_t["entry_price"]
                 hh = bar["high"]; ll = bar["low"]
                 open_t["mae"] = max(open_t.get("mae",0), (ep2-ll) if d=="long" else (hh-ep2))
                 open_t["mfe"] = max(open_t.get("mfe",0), (hh-ep2) if d=="long" else (ep2-ll))
 
-            # ── Update gating locks ─────────────────────────────
             if self.gating_enabled and gating_val is not None:
                 if long_locked  and c < gating_val: long_locked  = False
                 if short_locked and c > gating_val: short_locked = False
 
-            # ── Equity tracking ─────────────────────────────────
             if state != "flat" and open_t:
                 pts = (c - open_t["entry_price"]) if state == "long" \
                       else (open_t["entry_price"] - c)
@@ -568,7 +548,6 @@ class BacktestEngine:
             dd = eq - peak
             self.dd_curve.append(round(dd, 2))
 
-            # ── Emit progress (throttled) ───────────────────────
             now = _time.perf_counter()
             should_emit = (
                 i == 0 or
@@ -590,7 +569,6 @@ class BacktestEngine:
 
             prev_sl_ma_val = sl_ma_val
 
-            # ── Signal detection ────────────────────────────────
             if state != "flat" or pending_signal is not None:
                 continue
             if any(v is None for v in mv):
@@ -646,7 +624,6 @@ class BacktestEngine:
             if sig:
                 pending_signal = sig
 
-        # ── Close open trade at end of data ─────────────────────
         if state != "flat" and open_t:
             lb = self.bars[-1]; cp = lb["close"]
             d = open_t["direction"]
@@ -659,7 +636,6 @@ class BacktestEngine:
                       "exit_price": round(cp,2), "exit_reason": "end_of_data",
                       "holding_seconds": abs(lb["time"]-open_t["entry_time"]),
                       "bars_held": self.n-1-open_t["entry_bar"]}
-            # Apply spread to end-of-data exit
             trade_spread = closed.get("spread", 0.0)
             closed["exit_price"] = round(
                 self.spread_gen.apply_exit(closed["exit_price"], d, trade_spread), 4)
@@ -802,6 +778,10 @@ class BacktestEngine:
         )
 
     def _build_result(self):
+        perf = {}
+        build_t0 = _time.perf_counter()
+
+        stats_t0 = _time.perf_counter()
         stats = compute_all_stats(
             trades=self.trades,
             equity_curve=self.equity_curve,
@@ -809,18 +789,35 @@ class BacktestEngine:
             starting_capital=self.starting_cap,
             lot_size=self.lot_size,
         )
+        stats_t1 = _time.perf_counter()
+        perf["stats_seconds"] = round(stats_t1 - stats_t0, 4)
 
+        analytics_t0 = _time.perf_counter()
         analytics = compute_analytics(self.trades, self.bars,
                                       self.equity_curve, self.dd_curve,
                                       self.starting_cap)
+        analytics_t1 = _time.perf_counter()
+        perf["analytics_seconds"] = round(analytics_t1 - analytics_t0, 4)
 
-        return dict(
+        result = dict(
             stats=stats,
             trades=self.trades,
             equity_curve=ds_curve(self.equity_curve, 1500),
             drawdown_curve=ds_curve(self.dd_curve, 1500),
             analytics=analytics,
         )
+
+        build_t1 = _time.perf_counter()
+        perf["response_build_seconds"] = round(build_t1 - build_t0, 4)
+        perf["trade_count"] = len(self.trades)
+        result["performance"] = perf
+
+        print(f"  [BUILD TIMING] stats={perf['stats_seconds']:.3f}s "
+              f"analytics={perf['analytics_seconds']:.3f}s "
+              f"response_build={perf['response_build_seconds']:.3f}s "
+              f"trades={perf['trade_count']}")
+
+        return result
 
 # ════════════════════════════════════════════════════════════════════
 #  ANALYTICS + MONTE CARLO
@@ -901,48 +898,6 @@ def compute_analytics(trades, bars, equity_curve, dd_curve, starting_cap=10000):
                  wr=round(len([x for x in v if x>0])/len(v)*100,1) if v else 0)
                  for k,v in chop_by.items()}
 
-    N_SIM = 1000
-    rng = random.Random(42)
-    sim_finals=[]; sim_max_dds=[]; mc_paths_sample=[]
-    cap = starting_cap
-    for sim_i in range(N_SIM):
-        shuffled = nets[:]
-        rng.shuffle(shuffled)
-        cum_mc = cap; peak_mc = cap; max_dd_s = 0; cum_path = []
-        for p in shuffled:
-            cum_mc += p
-            cum_path.append(round(cum_mc, 2))
-            peak_mc = max(peak_mc, cum_mc)
-            dd_abs = cum_mc - peak_mc
-            max_dd_s = min(max_dd_s, dd_abs)
-        sim_finals.append(round(cum_mc, 2))
-        sim_max_dds.append(round(max_dd_s, 2))
-        if sim_i < 100:
-            mc_paths_sample.append(ds_curve(cum_path, 500))
-    sim_finals.sort(); sim_max_dds.sort()
-    def pct(arr,p): idx=int(len(arr)*p/100); return arr[min(idx,len(arr)-1)]
-
-    dd_10 = starting_cap * 0.10
-    dd_20 = starting_cap * 0.20
-    dd_30 = starting_cap * 0.30
-
-    mc = dict(
-        n_simulations=N_SIM,
-        final_equity=dict(p5=pct(sim_finals,5), p25=pct(sim_finals,25),
-                          p50=pct(sim_finals,50), p75=pct(sim_finals,75),
-                          p95=pct(sim_finals,95)),
-        max_drawdown=dict(p5=pct(sim_max_dds,5), p25=pct(sim_max_dds,25),
-                          p50=pct(sim_max_dds,50), p75=pct(sim_max_dds,75),
-                          p95=pct(sim_max_dds,95)),
-        prob_profitable=round(len([x for x in sim_finals if x > cap])/N_SIM*100,1),
-        prob_dd_10=round(len([x for x in sim_max_dds if abs(x) >= dd_10])/N_SIM*100,1),
-        prob_dd_20=round(len([x for x in sim_max_dds if abs(x) >= dd_20])/N_SIM*100,1),
-        prob_dd_30=round(len([x for x in sim_max_dds if abs(x) >= dd_30])/N_SIM*100,1),
-        paths_sample=mc_paths_sample,
-        final_dist=_histogram(sim_finals, bins=30),
-        dd_dist=_histogram(sim_max_dds, bins=30),
-    )
-
     total_comm=sum(t.get("commission",0) for t in trades)
     gross_abs=sum(abs(t["gross_pnl"]) for t in trades)
     comm_summary=dict(
@@ -960,7 +915,7 @@ def compute_analytics(trades, bars, equity_curve, dd_curve, starting_cap=10000):
         return_scatter=ret_scatter,
         time_of_day=hour_perf, day_of_week=dow_perf, by_month=mon_perf,
         regime=dict(volatility=vol_regime, choppiness=chop_regime),
-        monte_carlo=mc, commission=comm_summary)
+        monte_carlo={}, commission=comm_summary)
 
 def _histogram(data, bins=20):
     if not data: return dict(edges=[], counts=[])
@@ -972,7 +927,28 @@ def _histogram(data, bins=20):
     return dict(edges=edges, counts=counts)
 
 # ════════════════════════════════════════════════════════════════════
-#  FLASK ROUTES
+#  OPTIMIZED _clean (fast-path for numeric lists)
+# ════════════════════════════════════════════════════════════════════
+def _clean(obj):
+    if obj is None or isinstance(obj, (str, int, bool)):
+        return obj
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, list):
+        if obj and isinstance(obj[0], (int, float)):
+            return [
+                (None if isinstance(v, float) and (math.isnan(v) or math.isinf(v)) else v)
+                for v in obj
+            ]
+        return [_clean(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    return obj
+
+# ════════════════════════════════════════════════════════════════════
+#  FLASK ROUTES (WITH TIMING)
 # ════════════════════════════════════════════════════════════════════
 def _validate_and_load(cfg):
     if not cfg: raise ValueError("Empty body")
@@ -1022,19 +998,42 @@ def _validate_and_load(cfg):
 
     return bars, cfg
 
-def _clean(obj):
-    if isinstance(obj,float):
-        return None if (math.isnan(obj) or math.isinf(obj)) else obj
-    if isinstance(obj,dict): return {k:_clean(v) for k,v in obj.items()}
-    if isinstance(obj,list): return [_clean(v) for v in obj]
-    return obj
-
 @app.route("/api/backtest", methods=["POST"])
 def run_backtest():
     try:
+        route_t0 = _time.perf_counter()
+
         cfg=request.get_json(force=True); bars,cfg=_validate_and_load(cfg)
+
+        sim_t0 = _time.perf_counter()
         engine=BacktestEngine(bars,cfg); result=engine.run()
-        return jsonify(_clean(result)),200
+        sim_t1 = _time.perf_counter()
+
+        result = _clean(result)
+
+        json_t0 = _time.perf_counter()
+        response_body = json.dumps(result)
+        json_t1 = _time.perf_counter()
+
+        payload_kb = len(response_body) / 1024
+        route_t1 = _time.perf_counter()
+
+        # Inject timing into performance object
+        perf = result.get("performance", {})
+        perf["simulation_seconds"] = round(sim_t1 - sim_t0, 4)
+        perf["json_seconds"] = round(json_t1 - json_t0, 4)
+        perf["total_seconds"] = round(route_t1 - route_t0, 4)
+        perf["payload_size_kb"] = round(payload_kb, 1)
+
+        print(f"  [BACKTEST TIMING] simulation={perf.get('simulation_seconds',0):.3f}s "
+              f"stats={perf.get('stats_seconds',0):.3f}s "
+              f"analytics={perf.get('analytics_seconds',0):.3f}s "
+              f"json={perf.get('json_seconds',0):.3f}s "
+              f"payload={payload_kb:.1f}KB "
+              f"total={perf.get('total_seconds',0):.3f}s "
+              f"trades={perf.get('trade_count',0)}")
+
+        return Response(response_body, mimetype="application/json"), 200
     except ValueError as e: return jsonify(error=str(e)),400
     except FileNotFoundError as e: return jsonify(error=str(e)),404
     except Exception as e:
