@@ -1,25 +1,23 @@
-# backend/strategy_api.py
+"""
+JINNI ZERO — Strategy API Routes
+"""
 from __future__ import annotations
 
 import json
-import math
 import os
 import time as _time
 from datetime import datetime, timezone
 
 from flask import Blueprint, Response, jsonify, request
 
-from backend.engine_core import BacktestEngine, _clean
-from backend.strategy_loader import get_strategy, list_strategy_metadata
-
+from backend.engine_core import BacktestEngine
+from backend.shared import clean_for_json
+from backend.strategy_loader import get_strategy, list_strategy_metadata, validate_lookback
 
 strategy_api = Blueprint("strategy_api", __name__)
 DATA_DIR = "data"
 
 
-# ============================================================
-# Datetime helper
-# ============================================================
 def _parse_datetime_param(val):
     if not val or not isinstance(val, str) or not val.strip():
         return None
@@ -27,33 +25,26 @@ def _parse_datetime_param(val):
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M",
                 "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            dt = datetime.strptime(val, fmt)
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(val, fmt).replace(tzinfo=timezone.utc)
             return int(dt.timestamp())
         except ValueError:
             continue
     return None
 
 
-# ============================================================
-# Data loading
-# ============================================================
-def load_bars(range_pt: int, bar_range: int, start_date=None, end_date=None):
+def load_bars(range_pt, bar_range, start_date=None, end_date=None):
     path = os.path.join(DATA_DIR, f"{int(range_pt)}pt.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Dataset not found: {path}")
-
     with open(path, "r", encoding="utf-8") as f:
         bars = json.load(f)
 
     start_ts = _parse_datetime_param(start_date)
     end_ts = _parse_datetime_param(end_date)
-    if start_ts or end_ts:
-        if start_ts:
-            bars = [b for b in bars if int(b["time"]) >= start_ts]
-        if end_ts:
-            bars = [b for b in bars if int(b["time"]) <= end_ts]
-
+    if start_ts:
+        bars = [b for b in bars if int(b["time"]) >= start_ts]
+    if end_ts:
+        bars = [b for b in bars if int(b["time"]) <= end_ts]
     if bar_range and int(bar_range) > 0:
         bars = bars[-int(bar_range):]
 
@@ -72,20 +63,9 @@ def load_bars(range_pt: int, bar_range: int, start_date=None, end_date=None):
             "close": float(b["close"]),
             "volume": float(b.get("volume", 0) or 0),
         })
-
     return normalized
 
 
-# ============================================================
-# Strategy metadata
-# ============================================================
-def strategy_detail_payload(strategy):
-    return strategy.get_metadata()
-
-
-# ============================================================
-# Routes
-# ============================================================
 @strategy_api.get("/strategies")
 def strategies_list():
     return jsonify(list_strategy_metadata()), 200
@@ -95,7 +75,7 @@ def strategies_list():
 def strategy_detail(strategy_id):
     try:
         strategy = get_strategy(strategy_id)
-        return jsonify(strategy_detail_payload(strategy)), 200
+        return jsonify(strategy.get_metadata()), 200
     except KeyError as e:
         return jsonify({"error": str(e)}), 404
 
@@ -104,7 +84,6 @@ def strategy_detail(strategy_id):
 def strategy_backtest_run():
     try:
         route_t0 = _time.perf_counter()
-
         payload = request.get_json(force=True) or {}
 
         strategy_id = payload.get("strategy_id")
@@ -120,6 +99,10 @@ def strategy_backtest_run():
             end_date=payload.get("end_date"),
         )
 
+        # Validate lookback
+        lookback_override = int(payload.get("lookback_override", 0) or 0)
+        validate_lookback(strategy, len(bars), lookback_override)
+
         if len(bars) < 5:
             return jsonify({"error": "Insufficient data"}), 400
 
@@ -131,18 +114,15 @@ def strategy_backtest_run():
 
         result = engine.run()
 
-        # ── JSON serialization timing ─────────────
         json_t0 = _time.perf_counter()
         response_body = json.dumps(result)
         json_t1 = _time.perf_counter()
 
         payload_kb = len(response_body) / 1024
-        json_ms = (json_t1 - json_t0) * 1000
         total_ms = (json_t1 - route_t0) * 1000
 
-        print(f"  [ROUTE TIMING] json={json_ms:.1f}ms "
-              f"payload={payload_kb:.1f}KB "
-              f"route_total={total_ms:.1f}ms")
+        print(f"  [ROUTE TIMING] json={((json_t1-json_t0)*1000):.1f}ms "
+              f"payload={payload_kb:.1f}KB route_total={total_ms:.1f}ms")
 
         return Response(response_body, mimetype="application/json"), 200
 
@@ -150,5 +130,8 @@ def strategy_backtest_run():
         return jsonify({"error": str(e)}), 404
     except KeyError as e:
         return jsonify({"error": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
+        import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500

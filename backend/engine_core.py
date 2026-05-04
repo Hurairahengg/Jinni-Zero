@@ -1,36 +1,63 @@
-# backend/engine_core.py
 """
-JINNI ZERO — Slim Broker-Simulator Engine
-Strategy is king. Engine executes orders, tracks equity, records trades.
+JINNI ZERO — Strategy Backtest Engine (Legacy-Compatible Execution)
+===================================================================
+Uses the EXACT SAME execution logic as backtest_server.py:
+  - pending_signal → enter next bar OPEN
+  - SL/TP hit detection (ambiguous bar handling)
+  - MA cross exit support (engine-level, matching legacy)
+  - Engine-computed SL/TP (fixed pts, MA snapshot, R-multiple)
+  - Spread simulation
+  - Commission calculation (legacy calc_comm)
+  - Equity/drawdown tracking
+  - PnL via centralized dollar_math.py
+
+ALL dollar math goes through dollar_math.py:
+  dollars = points × lot_size × point_value
+
+R-multiples are computed FIRST (pure), dollars derived AFTER.
+
+Strategies are SIGNAL PROVIDERS ONLY.
+They return: BUY / SELL / HOLD / CLOSE + optional SL/TP.
+They NEVER touch sizing, PnL, equity, commission, or stats.
+
+ENGINE-COMPUTED SL/TP (Phase 3):
+  Strategies can request SL/TP modes that the engine computes
+  at fill time (next bar open), matching Legacy exactly:
+    sl_mode="fixed"       + sl_pts=8.0
+    sl_mode="ma_snapshot" + sl_ma_val=<MA value from signal bar>
+    tp_mode="r_multiple"  + tp_r=2.0
+
+MA CROSS EXITS (Phase 4):
+  Strategies can request engine-level MA cross exit checking:
+    engine_sl_ma_key="sl_ma"   → engine checks this MA for SL cross
+    engine_tp_ma_key="tp_ma"   → engine checks this MA for TP cross
 """
 from __future__ import annotations
 
+import logging
 import math
-import random
 import time as _time
-from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from backend.stats_engine import compute_all_stats, downsample_curve
+from backend.dollar_math import points_to_dollars, finalize_trade_pnl
+from backend.strategies.base import VALID_SIGNALS
+from backend.shared import (
+    precompute_ma,
+    get_or_compute_ma,
+    SpreadGenerator,
+    calc_comm,
+    compute_analytics,
+    clean_for_json,
+)
+
+logger = logging.getLogger("jinni.engine")
 
 
-# ============================================================
-# ENGINE DEFAULTS (MINIMAL)
-# ============================================================
-ENGINE_DEFAULTS = {
-    "default_size": 1.0,
-    "commission": {
-        "type": "flat",
-        "amount": 0.0,
-    },
-}
-
-
-# ============================================================
-# HELPERS
-# ============================================================
+# ════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ════════════════════════════════════════════════════════════════════
 def safe_float(v, default=0.0):
     try:
         if v is None:
@@ -41,757 +68,718 @@ def safe_float(v, default=0.0):
         return default
 
 
-def _clean(obj):
-    """Remove NaN/Inf from JSON-serialisable tree. Fast-paths for common types."""
-    if obj is None or isinstance(obj, (str, int, bool)):
-        return obj
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, list):
-        # Fast path: homogeneous numeric list (equity curves, MC paths, etc.)
-        if obj and isinstance(obj[0], (int, float)):
-            return [
-                (None if isinstance(v, float) and (math.isnan(v) or math.isinf(v)) else v)
-                for v in obj
-            ]
-        return [_clean(v) for v in obj]
-    if isinstance(obj, dict):
-        return {k: _clean(v) for k, v in obj.items()}
-    return obj
-
-
-# ============================================================
-# COMMISSION
-# ============================================================
-def calc_commission(cfg: dict, size: float) -> float:
-    if not cfg:
-        return 0.0
-    t = cfg.get("type", "flat")
-    amt = safe_float(cfg.get("amount", 0.0))
-    if t == "flat":
-        return amt
-    if t == "per_side":
-        return amt * 2.0
-    if t == "per_contract":
-        return amt * size
-    return amt
-
-
-# ============================================================
-# INDICATOR PRECOMPUTE FUNCTIONS
-# ============================================================
-def _precompute_sma(values, period):
-    n = len(values)
-    out = [None] * n
-    if period < 1 or n < period:
-        return out
-    s = 0.0
-    for i in range(n):
-        s += values[i]
-        if i >= period:
-            s -= values[i - period]
-        if i >= period - 1:
-            out[i] = s / period
-    return out
-
-
-def _precompute_ema(values, period):
-    n = len(values)
-    out = [None] * n
-    if period < 1 or n < period:
-        return out
-    seed = sum(values[:period]) / period
-    out[period - 1] = seed
-    ema = seed
-    k = 2.0 / (period + 1)
-    for i in range(period, n):
-        ema = values[i] * k + ema * (1 - k)
-        out[i] = ema
-    return out
-
-
-def _precompute_wma(values, period):
-    n = len(values)
-    out = [None] * n
-    if period < 1 or n < period:
-        return out
-    p = period
-    denom = p * (p + 1) / 2.0
-    s = 0.0
-    ws = 0.0
-    for j in range(p):
-        s += values[j]
-        ws += values[j] * (j + 1)
-    out[p - 1] = ws / denom
-    for i in range(p, n):
-        ws = ws + p * values[i] - s
-        s = s + values[i] - values[i - p]
-        out[i] = ws / denom
-    return out
-
-
-def _precompute_hma(values, period):
-    n = len(values)
-    out = [None] * n
-    p = int(period)
-    if p < 1:
-        return out
-    half = max(1, p // 2)
-    sq = max(1, int(math.floor(math.sqrt(p))))
-
-    full = _precompute_wma(values, p)
-    half_wma = _precompute_wma(values, half)
-
-    diff = [None] * n
-    start = None
-    for i in range(n):
-        if full[i] is not None and half_wma[i] is not None:
-            diff[i] = 2.0 * half_wma[i] - full[i]
-            if start is None:
-                start = i
-
-    if start is None:
-        return out
-
-    compact = []
-    mapping = []
-    for i in range(start, n):
-        if diff[i] is None:
-            break
-        compact.append(diff[i])
-        mapping.append(i)
-
-    if len(compact) < sq:
-        return out
-
-    final = _precompute_wma(compact, sq)
-    for idx, val in enumerate(final):
-        if val is not None:
-            out[mapping[idx]] = val
-    return out
-
-
-def _precompute_highest(values, period):
-    n = len(values)
-    out = [None] * n
-    if period < 1:
-        return out
-    for i in range(n):
-        if i < period - 1:
-            continue
-        out[i] = max(values[i - period + 1: i + 1])
-    return out
-
-
-def _precompute_lowest(values, period):
-    n = len(values)
-    out = [None] * n
-    if period < 1:
-        return out
-    for i in range(n):
-        if i < period - 1:
-            continue
-        out[i] = min(values[i - period + 1: i + 1])
-    return out
-
-
-def _precompute_true_range(bars):
-    out = [None] * len(bars)
-    prev_close = None
-    for i, b in enumerate(bars):
-        h = safe_float(b["high"])
-        l = safe_float(b["low"])
-        if prev_close is None:
-            tr = h - l
-        else:
-            tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
-        out[i] = tr
-        prev_close = safe_float(b["close"])
-    return out
-
-
-def _precompute_vwap(bars):
-    out = [None] * len(bars)
-    pv_sum = 0.0
-    vol_sum = 0.0
-    for i, b in enumerate(bars):
-        typical = (safe_float(b["high"]) + safe_float(b["low"]) + safe_float(b["close"])) / 3.0
-        vol = max(0.0, safe_float(b.get("volume", 0.0)))
-        pv_sum += typical * vol
-        vol_sum += vol
-        out[i] = (pv_sum / vol_sum) if vol_sum > 0 else typical
-    return out
-
-
-def _precompute_choppiness(bars, period):
-    n = len(bars)
-    out = [None] * n
-    if period < 2 or n < period:
-        return out
-    trs = _precompute_true_range(bars)
-    highs = [safe_float(b["high"]) for b in bars]
-    lows = [safe_float(b["low"]) for b in bars]
-    for i in range(n):
-        if i < period - 1:
-            continue
-        start = i - period + 1
-        tr_sum = sum(trs[start:i + 1])
-        hh = max(highs[start:i + 1])
-        ll = min(lows[start:i + 1])
-        denom = hh - ll
-        if denom <= 0 or tr_sum <= 0:
-            out[i] = None
-        else:
-            out[i] = 100.0 * math.log10(tr_sum / denom) / math.log10(period)
-    return out
-
-
+# ════════════════════════════════════════════════════════════════════
+#  ADDITIONAL INDICATOR PRECOMPUTE (for strategy build_indicators)
+# ════════════════════════════════════════════════════════════════════
 def _source_values(bars, source):
-    if source == "open":
-        return [safe_float(b["open"]) for b in bars]
-    if source == "high":
-        return [safe_float(b["high"]) for b in bars]
-    if source == "low":
-        return [safe_float(b["low"]) for b in bars]
+    if source == "open":  return [safe_float(b["open"])  for b in bars]
+    if source == "high":  return [safe_float(b["high"])  for b in bars]
+    if source == "low":   return [safe_float(b["low"])   for b in bars]
     return [safe_float(b["close"]) for b in bars]
 
 
 def precompute_indicator_series(bars, spec):
-    kind = spec["kind"].upper()
+    kind   = spec["kind"].upper()
     source = spec.get("source", "close")
     period = int(spec.get("period", 1))
     values = _source_values(bars, source)
-
-    if kind == "SMA":
-        return _precompute_sma(values, period)
-    if kind == "EMA":
-        return _precompute_ema(values, period)
-    if kind == "WMA":
-        return _precompute_wma(values, period)
-    if kind == "HMA":
-        return _precompute_hma(values, period)
-    if kind == "HIGHEST_HIGH":
-        return _precompute_highest(values, period)
-    if kind == "LOWEST_LOW":
-        return _precompute_lowest(values, period)
-    if kind == "VWAP":
-        return _precompute_vwap(bars)
-    if kind == "CHOPPINESS":
-        return _precompute_choppiness(bars, period)
-
+    if kind in ("SMA", "EMA", "WMA", "HMA"):
+        return precompute_ma(values, kind, period)
     raise ValueError(f"Unsupported indicator kind: {kind}")
 
 
-# ============================================================
-# POSITION MODEL
-# ============================================================
-@dataclass
-class Position:
-    position_id: int
-    direction: str
-    entry_time: int
-    entry_index: int
-    entry_price: float
-    size: float
-    stop_loss: Optional[float]
-    take_profit: Optional[float]
-    entry_reason: Optional[str]
-    risk_points: float
-    highest_seen: float
-    lowest_seen: float
+# ════════════════════════════════════════════════════════════════════
+#  SIGNAL VALIDATION
+# ════════════════════════════════════════════════════════════════════
+def validate_signal(raw, bar_index):
+    """Normalize + validate strategy output. Returns clean dict or raises."""
+    if raw is None:
+        return {"signal": "HOLD"}
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Bar {bar_index}: strategy returned {type(raw).__name__}, expected dict or None"
+        )
+
+    sig = raw.get("signal")
+    if sig is not None:
+        sig = str(sig).upper()
+    if sig not in VALID_SIGNALS:
+        raise ValueError(
+            f"Bar {bar_index}: invalid signal '{sig}'. Must be BUY/SELL/HOLD/CLOSE/None"
+        )
+
+    out = {"signal": sig or "HOLD"}
+
+    # ── Optional absolute SL/TP on entry signals ─────────────
+    if raw.get("sl") is not None:
+        out["sl"] = float(raw["sl"])
+    if raw.get("tp") is not None:
+        out["tp"] = float(raw["tp"])
+
+    # ── Engine-computed SL/TP fields (Phase 3) ───────────────
+    if raw.get("sl_mode") is not None:
+        out["sl_mode"] = str(raw["sl_mode"])
+    if raw.get("sl_pts") is not None:
+        out["sl_pts"] = float(raw["sl_pts"])
+    if raw.get("sl_ma_key") is not None:
+        out["sl_ma_key"] = str(raw["sl_ma_key"])
+    if raw.get("sl_ma_val") is not None:
+        out["sl_ma_val"] = float(raw["sl_ma_val"])
+    if raw.get("tp_mode") is not None:
+        out["tp_mode"] = str(raw["tp_mode"])
+    if raw.get("tp_r") is not None:
+        out["tp_r"] = float(raw["tp_r"])
+
+    # ── Engine-level MA cross exit keys (Phase 4) ────────────
+    if raw.get("engine_sl_ma_key") is not None:
+        out["engine_sl_ma_key"] = str(raw["engine_sl_ma_key"])
+    if raw.get("engine_tp_ma_key") is not None:
+        out["engine_tp_ma_key"] = str(raw["engine_tp_ma_key"])
+
+    # ── CLOSE signal ─────────────────────────────────────────
+    if out["signal"] == "CLOSE":
+        out["close"] = True
+        out["close_reason"] = str(raw.get("close_reason", "strategy_close"))
+    elif raw.get("close"):
+        out["close"] = True
+        out["close_reason"] = str(raw.get("close_reason", "strategy_close"))
+
+    # ── Dynamic SL/TP updates ────────────────────────────────
+    if raw.get("update_sl") is not None:
+        out["update_sl"] = float(raw["update_sl"])
+    if raw.get("update_tp") is not None:
+        out["update_tp"] = float(raw["update_tp"])
+
+    return out
 
 
-# ============================================================
-# POSITION VIEW (READ-ONLY FOR STRATEGY)
-# ============================================================
-class PositionView:
-    __slots__ = (
-        'direction', 'entry_price', 'size', 'stop_loss', 'take_profit',
-        'entry_time', 'bars_held', 'highest_seen', 'lowest_seen',
-        'unrealized_pnl', 'current_r', 'risk_points',
+# ════════════════════════════════════════════════════════════════════
+#  POSITION STATE (frozen — read-only view passed to strategy)
+# ════════════════════════════════════════════════════════════════════
+@dataclass(frozen=True)
+class PositionState:
+    """Immutable snapshot of open trade state. Strategy can READ but not MODIFY."""
+    has_position:    bool
+    direction:       Optional[str]   = None
+    entry_price:     Optional[float] = None
+    entry_time:      Optional[int]   = None
+    entry_bar:       Optional[int]   = None
+    bars_held:       int             = 0
+    sl_level:        Optional[float] = None
+    tp_level:        Optional[float] = None
+    unrealized_pts:  float           = 0.0
+    unrealized_pnl:  float           = 0.0
+    mae:             float           = 0.0
+    mfe:             float           = 0.0
+
+
+def _build_position_state(open_t, bar_index, close_price, lot_size, point_value=1.0):
+    """Build frozen PositionState from open trade dict."""
+    if open_t is None:
+        return PositionState(has_position=False)
+
+    d = open_t["direction"]
+    ep = open_t["entry_price"]
+    pts = (close_price - ep) if d == "long" else (ep - close_price)
+
+    return PositionState(
+        has_position=True,
+        direction=d,
+        entry_price=ep,
+        entry_time=open_t.get("entry_time"),
+        entry_bar=open_t.get("entry_bar"),
+        bars_held=bar_index - open_t.get("entry_bar", 0),
+        sl_level=open_t.get("sl_level"),
+        tp_level=open_t.get("tp_level"),
+        unrealized_pts=round(pts, 4),
+        unrealized_pnl=round(points_to_dollars(pts, lot_size, point_value), 2),
+        mae=round(open_t.get("mae", 0), 4),
+        mfe=round(open_t.get("mfe", 0), 4),
     )
 
-    def __init__(self, pos: Position, current_price: float, bar_index: int):
-        self.direction = pos.direction
-        self.entry_price = pos.entry_price
-        self.size = pos.size
-        self.stop_loss = pos.stop_loss
-        self.take_profit = pos.take_profit
-        self.entry_time = pos.entry_time
-        self.bars_held = bar_index - pos.entry_index
-        self.highest_seen = pos.highest_seen
-        self.lowest_seen = pos.lowest_seen
-        self.risk_points = pos.risk_points
 
-        if pos.direction == "long":
-            self.unrealized_pnl = (current_price - pos.entry_price) * pos.size
-        else:
-            self.unrealized_pnl = (pos.entry_price - current_price) * pos.size
+# ════════════════════════════════════════════════════════════════════
+#  STRATEGY CONTEXT (passed to strategy.on_bar)
+# ════════════════════════════════════════════════════════════════════
+class StrategyContext:
+    """Read-only context (except .state) passed to strategy each bar."""
+    __slots__ = (
+        "index", "bar", "bars", "indicators", "ind_series",
+        "position", "balance", "equity", "trades", "params", "state",
+        "prev_indicators",
+    )
 
-        if pos.risk_points > 0:
-            if pos.direction == "long":
-                self.current_r = (current_price - pos.entry_price) / pos.risk_points
-            else:
-                self.current_r = (pos.entry_price - current_price) / pos.risk_points
-        else:
-            self.current_r = 0.0
-
-
-# ============================================================
-# ANALYTICS BUILDER
-# ============================================================
-def build_analytics(trades, bars, equity_curve, dd_curve, starting_capital):
-    t0 = _time.perf_counter()
-
-    if not trades:
-        return {}
-
-    nets = [safe_float(t.get("net_pnl")) for t in trades]
-    r_vals = [safe_float(t.get("net_pnl_r")) for t in trades]
-
-    def hist(data, bins=20):
-        if not data:
-            return {"edges": [], "counts": []}
-        mn, mx = min(data), max(data)
-        if mn == mx:
-            return {"edges": [mn, mx], "counts": [len(data)]}
-        w = (mx - mn) / bins
-        edges = [round(mn + i * w, 3) for i in range(bins + 1)]
-        counts = [0] * bins
-        for x in data:
-            counts[min(int((x - mn) / w), bins - 1)] += 1
-        return {"edges": edges, "counts": counts}
-
-    # ── Rolling (20-trade window) ─────────────────
-    W = 20
-    roll_wr = []
-    roll_exp = []
-    roll_pf = []
-    roll_sharpe = []
-    for i in range(len(trades)):
-        s = max(0, i - W + 1)
-        chunk = [safe_float(t["net_pnl"]) for t in trades[s:i + 1]]
-        wc = [x for x in chunk if x > 0]
-        lc = [x for x in chunk if x <= 0]
-        wrc = len(wc) / len(chunk) if chunk else 0
-        awc = sum(wc) / len(wc) if wc else 0
-        alc = sum(lc) / len(lc) if lc else 0
-        roll_wr.append(round(wrc * 100, 1))
-        roll_exp.append(round(wrc * awc + (1 - wrc) * alc, 2))
-        gwa = sum(wc)
-        gla = abs(sum(lc))
-        roll_pf.append(round(gwa / gla, 3) if gla else None)
-        if len(chunk) > 1:
-            mu = sum(chunk) / len(chunk)
-            var = sum((x - mu) ** 2 for x in chunk) / (len(chunk) - 1)
-            sd = math.sqrt(var) if var > 0 else 0
-            roll_sharpe.append(round((mu / sd) * math.sqrt(252), 3) if sd else None)
-        else:
-            roll_sharpe.append(None)
-
-    dur_vals = [safe_float(t.get("bars_held")) for t in trades]
-
-    mae_mfe = [
-        {"mae": round(safe_float(t.get("mae_dollar")), 2),
-         "mfe": round(safe_float(t.get("mfe_dollar")), 2),
-         "win": safe_float(t.get("net_pnl")) > 0}
-        for t in trades
-        if t.get("mae_dollar") is not None and t.get("mfe_dollar") is not None
-    ]
-
-    ret_scatter = [
-        {"x": i + 1, "y": round(r, 3), "win": r > 0}
-        for i, r in enumerate(r_vals)
-    ]
-
-    # ── Time breakdowns ──────────────────────────
-    def _ts_dt(ts):
-        try:
-            t = float(ts)
-            if t > 1e12:
-                t /= 1000
-            return datetime.fromtimestamp(t, tz=timezone.utc)
-        except Exception:
-            return None
-
-    DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-    by_hour = defaultdict(list)
-    by_dow = defaultdict(list)
-    by_mon = defaultdict(list)
-    for t in trades:
-        dt = _ts_dt(t.get("entry_time"))
-        if not dt:
-            continue
-        pnl = safe_float(t.get("net_pnl"))
-        by_hour[dt.hour].append(pnl)
-        by_dow[dt.weekday()].append(pnl)
-        by_mon[dt.month - 1].append(pnl)
-
-    def _perf(d):
-        return {
-            "trades": len(d), "net": round(sum(d), 2),
-            "wr": round(len([x for x in d if x > 0]) / len(d) * 100, 1) if d else 0,
-        }
-
-    hour_perf = {str(h): _perf(v) for h, v in by_hour.items()}
-    dow_perf = {DOW[d]: _perf(v) for d, v in by_dow.items()}
-    mon_perf = {MONTHS[m]: _perf(v) for m, v in by_mon.items()} 
-
-    # ── Regime ────────────────────────────────────
-    bar_ranges = [safe_float(b["high"]) - safe_float(b["low"]) for b in bars]
-    vol_regime = {}
-    if bar_ranges:
-        med_rng = sorted(bar_ranges)[len(bar_ranges) // 2]
-        by_vol = {"low_vol": [], "high_vol": []}
-        for t in trades:
-            bi = int(safe_float(t.get("entry_index", t.get("entry_bar", 0))))
-            if bi < len(bar_ranges):
-                k = "low_vol" if bar_ranges[bi] < med_rng else "high_vol"
-                by_vol[k].append(safe_float(t.get("net_pnl")))
-        vol_regime = {k: _perf(v) for k, v in by_vol.items() if v}
-
-    chop_by = {"trending": [], "choppy": []}
-    for t in trades:
-        bi = int(safe_float(t.get("entry_index", t.get("entry_bar", 0))))
-        if bi >= 3:
-            last3 = [safe_float(bars[bi - j]["close"]) - safe_float(bars[bi - j]["open"])
-                      for j in range(1, 4)]
-            same = all(x > 0 for x in last3) or all(x < 0 for x in last3)
-            chop_by["trending" if same else "choppy"].append(safe_float(t.get("net_pnl")))
-    chop_regime = {k: _perf(v) for k, v in chop_by.items() if v}
-
-    # ── Commission ────────────────────────────────
-    total_comm = sum(safe_float(t.get("commission")) for t in trades)
-    gross_sum = sum(safe_float(t.get("gross_pnl")) for t in trades)
-    net_sum = sum(safe_float(t.get("net_pnl")) for t in trades)
-    gross_abs = sum(abs(safe_float(t.get("gross_pnl"))) for t in trades)
-
-    return {
-        "rolling": {
-            "win_rate": roll_wr, "expectancy": roll_exp,
-            "profit_factor": roll_pf, "sharpe": roll_sharpe,
-        },
-        "r_histogram": hist(r_vals, 20),
-        "duration_histogram": hist(dur_vals, 15),
-        "mae_mfe": mae_mfe,
-        "return_scatter": ret_scatter,
-        "time_of_day": hour_perf,
-        "day_of_week": dow_perf,
-        "by_month": mon_perf,
-        "regime": {"volatility": vol_regime, "choppiness": chop_regime},
-        "monte_carlo": {},
-        "commission": {
-            "total": round(total_comm, 2),
-            "per_trade": round(total_comm / len(trades), 2) if trades else 0,
-            "net_without_comm": round(gross_sum, 2),
-            "net_with_comm": round(net_sum, 2),
-            "pct_of_gross": round(total_comm / gross_abs * 100, 2) if gross_abs else 0,
-        },
-    }
+    def __init__(self, *, index, bar, bars, indicators, ind_series,
+                 position, balance, equity, trades, params, state,
+                 prev_indicators):
+        self.index           = index
+        self.bar             = bar
+        self.bars            = bars
+        self.indicators      = indicators
+        self.ind_series      = ind_series
+        self.position        = position
+        self.balance         = balance
+        self.equity          = equity
+        self.trades          = trades
+        self.params          = params
+        self.state           = state
+        self.prev_indicators = prev_indicators
 
 
-# ============================================================
-# BACKTEST ENGINE (SLIM BROKER SIMULATOR)
-# ============================================================
+# ════════════════════════════════════════════════════════════════════
+#  BACKTEST ENGINE (LEGACY EXECUTION + STRATEGY SIGNALS)
+# ════════════════════════════════════════════════════════════════════
 class BacktestEngine:
-    def __init__(self, bars: List[dict], strategy, payload: dict):
-        self.bars = [dict(b, index=i) for i, b in enumerate(bars)]
-        self.strategy = strategy
-        self.payload = payload or {}
+    """
+    The engine is a DUMB BROKER.
+    It uses LEGACY execution logic for EVERYTHING:
+      - pending_signal → enter next bar OPEN
+      - engine-computed SL/TP at fill time (fixed pts, MA snapshot, R-multiple)
+      - spread on entry/exit/sl/tp
+      - SL/TP hit detection + ambiguous bar handling
+      - MA cross exit detection (engine-level)
+      - PnL via centralized dollar_math (points × lot_size × point_value)
+      - commission = legacy calc_comm
+      - MAE/MFE tracking
+      - equity/drawdown curves
 
+    The ONLY input from strategy is: signal + optional sl/tp/close.
+    """
+
+    def __init__(self, bars, strategy, payload):
+        self.bars       = bars
+        self.strategy   = strategy
+        self.payload    = payload or {}
+        self.n          = len(bars)
+
+        # ── Strategy params ──────────────────────────────────────
         self.params = strategy.validate_parameters(
             self.payload.get("parameters", {})
         )
 
-        self.engine_cfg = {**ENGINE_DEFAULTS}
+        # ── Legacy engine config (from payload) ──────────────────
+        self.lot_size       = float(self.payload.get("lot_size", 1.0))
+        self.point_value    = float(self.payload.get("point_value", 1.0))
+        self.starting_cap   = float(self.payload.get("starting_capital", 10000.0))
+        self.comm_cfg       = self.payload.get("commission", {})
+        self.ambiguous_mode = self.payload.get("ambiguous_bar_mode", "conservative")
 
-        self.starting_capital = safe_float(
-            self.payload.get("starting_capital", 10000.0), 10000.0
-        )
-        self.balance = self.starting_capital
-        self.equity = self.starting_capital
+        # ── Spread (legacy-exact) ────────────────────────────────
+        self.spread_gen = SpreadGenerator(self.payload.get("spread", {}))
 
-        self.position: Optional[Position] = None
-        self.position_counter = 0
+        # ── Lookback ─────────────────────────────────────────────
+        strategy_min = getattr(strategy, "min_lookback", 0) or 0
+        user_override = int(self.payload.get("lookback_override", 0) or 0)
+        self.lookback = max(strategy_min, user_override)
 
-        self.trades: List[dict] = []
-        self.equity_curve: List[float] = []
-        self.drawdown_curve: List[float] = []
-        self.peak_equity = self.starting_capital
-
-        self.state: Dict[str, Any] = {}
-
+        # ── Precompute strategy indicators ───────────────────────
         self.indicator_plan = strategy.build_indicators(self.params)
         self.indicator_store = {}
         for spec in self.indicator_plan:
             self.indicator_store[spec["key"]] = precompute_indicator_series(self.bars, spec)
 
+        # ── Results ──────────────────────────────────────────────
+        self.trades       = []
+        self.equity_curve = []
+        self.dd_curve     = []
+
+        print(
+            f"  [ENGINE] {self.n} bars | strategy={strategy.strategy_id} | "
+            f"lot={self.lot_size} | pv={self.point_value} | cap={self.starting_cap} | "
+            f"lookback={self.lookback} | spread={self.spread_gen.enabled} | "
+            f"ambiguous={self.ambiguous_mode}"
+        )
+
+    # ── Indicator helpers ────────────────────────────────────────
     def _indicators_at(self, i):
-        return {k: (v[i] if i < len(v) else None) for k, v in self.indicator_store.items()}
+        return {
+            k: (v[i] if i < len(v) else None)
+            for k, v in self.indicator_store.items()
+        }
 
-    def _mtm(self, price):
-        if not self.position:
-            return self.balance
-        if self.position.direction == "long":
-            return self.balance + (price - self.position.entry_price) * self.position.size
-        return self.balance + (self.position.entry_price - price) * self.position.size
+    # ── Build context for strategy ───────────────────────────────
+    def _build_ctx(self, i, bar, open_t, cum, equity, prev_indicators=None):
+        pos_state = _build_position_state(
+            open_t, i, float(bar["close"]), self.lot_size, self.point_value
+        )
+        return StrategyContext(
+            index=i,
+            bar=bar,
+            bars=self.bars,
+            indicators=self._indicators_at(i),
+            ind_series=self.indicator_store,
+            position=pos_state,
+            balance=round(self.starting_cap + cum, 2),
+            equity=round(equity, 2),
+            trades=self.trades,
+            params=self.params,
+            state=self._strategy_state,
+            prev_indicators=prev_indicators or {},
+        )
 
-    def _pos_view(self, bar):
-        if not self.position or not bar:
-            return None
-        return PositionView(self.position, safe_float(bar["close"]), bar["index"])
+    # ════════════════════════════════════════════════════════════════
+    #  LEGACY EXIT CHECK (SL/TP hit + MA cross exits)
+    # ════════════════════════════════════════════════════════════════
+    def _check_exit(self, t, bar, bi):
+        d  = t["direction"]
+        ep = t["entry_price"]
+        sl = t.get("sl_level")
+        tp = t.get("tp_level")
+        hh = bar["high"]
+        ll = bar["low"]
+        c  = bar["close"]
 
-    def _record_trade(self, bar, exit_price, reason):
-        pos = self.position
-        if not pos:
-            return
+        t["bars_held"] = bi - t["entry_bar"]
+        t["mae"] = max(t.get("mae", 0), (ep - ll) if d == "long" else (hh - ep))
+        t["mfe"] = max(t.get("mfe", 0), (hh - ep) if d == "long" else (ep - ll))
 
-        ep = pos.entry_price
-        xp = exit_price
-        d = pos.direction
+        # ── Fixed SL/TP hit detection ────────────────────────────
+        sl_hit = False
+        if sl is not None:
+            if d == "long"  and ll <= sl: sl_hit = True
+            if d == "short" and hh >= sl: sl_hit = True
 
-        points = (xp - ep) if d == "long" else (ep - xp)
-        gross = points * pos.size
-        comm = calc_commission(self.payload.get("commission", {}), pos.size)
-        net = gross - comm
+        tp_hit = False
+        if tp is not None:
+            if d == "long"  and hh >= tp: tp_hit = True
+            if d == "short" and ll <= tp: tp_hit = True
 
-        r_mult = None
-        if pos.risk_points > 0:
-            r_mult = round(points / pos.risk_points, 3)
+        # ── Ambiguous bar handling (legacy-exact) ────────────────
+        if sl_hit and tp_hit:
+            m = self.ambiguous_mode
+            if m == "optimistic":
+                return self._make_exit(t, bar, bi, tp, "TP_R")
+            elif m == "nearest_to_open":
+                if abs(bar["open"] - sl) <= abs(bar["open"] - tp):
+                    return self._make_exit(t, bar, bi, sl, "SL_HIT")
+                else:
+                    return self._make_exit(t, bar, bi, tp, "TP_R")
+            else:
+                return self._make_exit(t, bar, bi, sl, "SL_HIT")
 
-        if d == "long":
-            mae_pts = max(0.0, ep - pos.lowest_seen)
-            mfe_pts = max(0.0, pos.highest_seen - ep)
-        else:
-            mae_pts = max(0.0, pos.highest_seen - ep)
-            mfe_pts = max(0.0, ep - pos.lowest_seen)
+        if sl_hit:
+            return self._make_exit(t, bar, bi, sl, "SL_HIT")
+        if tp_hit:
+            return self._make_exit(t, bar, bi, tp, "TP_R")
 
-        self.trades.append({
-            "position_id": pos.position_id,
-            "direction": d,
-            "entry_time": pos.entry_time,
+        # ── MA cross exits (Phase 4 — legacy-exact timing) ──────
+        sl_ma_key = t.get("_engine_sl_ma_key")
+        if sl_ma_key and sl_ma_key in self.indicator_store:
+            sl_ma_series = self.indicator_store[sl_ma_key]
+            sl_ma_val = sl_ma_series[bi] if bi < len(sl_ma_series) else None
+            if sl_ma_val is not None:
+                if d == "long" and c < sl_ma_val:
+                    return self._make_exit(t, bar, bi, c, "MA_SL_EXIT")
+                if d == "short" and c > sl_ma_val:
+                    return self._make_exit(t, bar, bi, c, "MA_SL_EXIT")
+
+        tp_ma_key = t.get("_engine_tp_ma_key")
+        if tp_ma_key and tp_ma_key in self.indicator_store:
+            tp_ma_series = self.indicator_store[tp_ma_key]
+            tp_ma_val = tp_ma_series[bi] if bi < len(tp_ma_series) else None
+            if tp_ma_val is not None:
+                if d == "long" and c < tp_ma_val:
+                    return self._make_exit(t, bar, bi, c, "MA_TP_EXIT")
+                if d == "short" and c > tp_ma_val:
+                    return self._make_exit(t, bar, bi, c, "MA_TP_EXIT")
+
+        return None
+
+    def _make_exit(self, t, bar, bi, exit_price, reason):
+        return {
+            **t,
+            "exit_bar": bi,
             "exit_time": bar["time"],
-            "entry_price": round(ep, 4),
-            "exit_price": round(xp, 4),
-            "size": pos.size,
-            "stop_loss": pos.stop_loss,
-            "take_profit": pos.take_profit,
-            "entry_reason": pos.entry_reason,
+            "exit_price": round(exit_price, 4),
             "exit_reason": reason,
-            "bars_held": bar["index"] - pos.entry_index,
-            "holding_seconds": abs(bar["time"] - pos.entry_time),
-            "points_pnl": round(points, 4),
-            "gross_pnl": round(gross, 2),
-            "commission": round(comm, 2),
-            "net_pnl": round(net, 2),
-            "net_pnl_r": r_mult,
-            "risk_pts": round(pos.risk_points, 4) if pos.risk_points > 0 else None,
-            "mae": round(mae_pts, 4),
-            "mfe": round(mfe_pts, 4),
-            "mae_dollar": round(mae_pts * pos.size, 2),
-            "mfe_dollar": round(mfe_pts * pos.size, 2),
-            "entry_bar": pos.entry_index,
-            "entry_index": pos.entry_index,
-        })
+            "holding_seconds": abs(bar["time"] - t["entry_time"]),
+            "bars_held": bi - t["entry_bar"],
+        }
 
-        self.balance += net
-        self.position = None
+    # ════════════════════════════════════════════════════════════════
+    #  FINALIZE TRADE (centralized via dollar_math.py)
+    # ════════════════════════════════════════════════════════════════
+    def _finalize_trade(self, closed):
+        commission = calc_comm(self.comm_cfg)
+        finalize_trade_pnl(
+            closed,
+            lot_size=self.lot_size,
+            point_value=self.point_value,
+            commission=commission,
+        )
 
-    def _ctx(self, bar):
-        return type("Ctx", (), {
-            "index": bar["index"] if bar else None,
-            "bar": bar,
-            "bars": self.bars,
-            "indicators": self._indicators_at(bar["index"]) if bar else {},
-            "ind_series": self.indicator_store,
-            "position": self._pos_view(bar),
-            "balance": self.balance,
-            "equity": self.equity,
-            "trades": self.trades,
-            "params": self.params,
-            "state": self.state,
-        })()
+    # ── Helper: close trade cleanly ──────────────────────────────
+    def _close_trade(self, open_t, bar, bi, exit_price, reason, cum):
+        """Close a trade with spread, finalize, append. Returns new cum."""
+        # ── Update MAE/MFE for exit bar (legacy-exact) ───────────
+        d = open_t["direction"]
+        ep = open_t["entry_price"]
+        hh = bar["high"]
+        ll = bar["low"]
+        open_t["bars_held"] = bi - open_t["entry_bar"]
+        open_t["mae"] = max(open_t.get("mae", 0),
+                            (ep - ll) if d == "long" else (hh - ep))
+        open_t["mfe"] = max(open_t.get("mfe", 0),
+                            (hh - ep) if d == "long" else (ep - ll))
 
+        closed = self._make_exit(open_t, bar, bi, exit_price, reason)
+
+        # ── Apply spread to exit price ───────────────────────────
+        trade_spread = closed.get("spread", 0.0)
+        closed["exit_price"] = round(
+            self.spread_gen.apply_exit(exit_price, closed["direction"], trade_spread), 4
+        )
+
+        # ── Strip engine-internal keys from trade record ─────────
+        closed.pop("_engine_sl_ma_key", None)
+        closed.pop("_engine_tp_ma_key", None)
+
+        self._finalize_trade(closed)
+        cum += closed["net_pnl"]
+        closed["cumulative_pnl"] = round(cum, 2)
+        self.trades.append(closed)
+
+        if len(self.trades) <= 5:
+            t = closed
+            print(
+                f"  [TRADE #{t['id']}] {t['direction'].upper()} "
+                f"entry={t['entry_price']} exit={t['exit_price']} "
+                f"SL={t.get('sl_level')} TP={t.get('tp_level')} "
+                f"risk={t.get('risk_pts')}pts "
+                f"points={t.get('points_pnl')} "
+                f"R={t.get('net_pnl_r')} "
+                f"gross=${t.get('gross_pnl')} "
+                f"comm=${t.get('commission')} "
+                f"net=${t.get('net_pnl')} "
+                f"reason={t.get('exit_reason')}"
+            )
+
+        return cum
+
+    # ════════════════════════════════════════════════════════════════
+    #  MAIN RUN
+    # ════════════════════════════════════════════════════════════════
     def run(self):
         perf = {}
         total_t0 = _time.perf_counter()
 
-        # ── Simulation ────────────────────────────
-        sim_t0 = _time.perf_counter()
-
-        init_ctx = self._ctx(self.bars[0] if self.bars else None)
+        # ── Init strategy ────────────────────────────────────────
+        self._strategy_state = {}
+        init_ctx = self._build_ctx(0, self.bars[0], None, 0.0, self.starting_cap)
         self.strategy.on_init(init_ctx)
 
+        # ── Legacy loop state ────────────────────────────────────
+        state = "flat"
+        open_t = None
+        pending_signal = None   # dict or None
+        cum = 0.0
+        peak = self.starting_cap
+        prev_indicators = {}
+
+        sim_t0 = _time.perf_counter()
+
         for i, bar in enumerate(self.bars):
-            close = safe_float(bar["close"])
+            c = float(bar["close"])
+            o = float(bar["open"])
+            h = float(bar["high"])
+            l = float(bar["low"])
 
-            if self.position:
-                self.position.highest_seen = max(
-                    self.position.highest_seen, safe_float(bar["high"])
-                )
-                self.position.lowest_seen = min(
-                    self.position.lowest_seen, safe_float(bar["low"])
-                )
+            just_entered = False
 
-            self.equity = self._mtm(close)
-            self.peak_equity = max(self.peak_equity, self.equity)
-            self.equity_curve.append(round(self.equity, 2))
-            self.drawdown_curve.append(round(self.peak_equity - self.equity, 2))
+            # ══════════════════════════════════════════════════════
+            # STEP 1: Process pending entry at THIS bar OPEN
+            # (legacy: pending_signal → enter at next bar open)
+            #
+            # ENGINE-COMPUTED SL/TP (Phase 3):
+            #   SL/TP are computed from the FILL PRICE (this bar's
+            #   open), matching Legacy exactly. Order of operations:
+            #     1. Compute SL from pre-spread entry price
+            #     2. Compute TP from pre-spread entry + pre-spread risk
+            #     3. Apply spread to entry, SL, TP
+            #     4. Recompute risk_pts from spread-adjusted values
+            # ══════════════════════════════════════════════════════
+            if pending_signal is not None and state == "flat":
+                direction = pending_signal["direction"]
+                ep = o  # pre-spread entry price
 
-            ctx = self._ctx(bar)
-            action = self.strategy.on_bar(ctx) or {}
+                # ── SL computation (at pre-spread entry price) ───
+                sl_level = None
+                risk_pts = None
+                sl_mode = pending_signal.get("sl_mode")
 
-            if self.position and action.get("exit"):
-                xp = safe_float(action.get("exit_price", close), close)
-                self._record_trade(bar, xp, action.get("reason", "strategy_exit"))
-                self.equity = self._mtm(close)
-                self.equity_curve[-1] = round(self.equity, 2)
-                self.drawdown_curve[-1] = round(self.peak_equity - self.equity, 2)
-                continue
+                if sl_mode == "fixed":
+                    pts = float(pending_signal.get("sl_pts", 0))
+                    if pts > 0:
+                        sl_level = (ep - pts) if direction == "long" else (ep + pts)
+                        sl_level = round(sl_level, 4)
+                        risk_pts = pts
 
-            if self.position:
-                if "update_sl" in action:
-                    self.position.stop_loss = action["update_sl"]
-                if "update_tp" in action:
-                    self.position.take_profit = action["update_tp"]
+                elif sl_mode == "ma_snapshot":
+                    ma_val = pending_signal.get("sl_ma_val")
+                    if ma_val is not None:
+                        if direction == "long" and ma_val < ep:
+                            sl_level = round(ma_val, 4)
+                            risk_pts = round(abs(ep - sl_level), 4)
+                        elif direction == "short" and ma_val > ep:
+                            sl_level = round(ma_val, 4)
+                            risk_pts = round(abs(ep - sl_level), 4)
 
-            if not self.position and action.get("enter") in ("long", "short"):
-                self.position_counter += 1
-                direction = action["enter"]
-                ep = safe_float(action.get("entry_price", close), close)
-                size = safe_float(action.get("size"), self.engine_cfg["default_size"])
+                elif pending_signal.get("sl") is not None:
+                    # Absolute SL (existing behavior)
+                    sl_level = float(pending_signal["sl"])
+                    risk_pts = abs(ep - sl_level) if sl_level is not None else None
 
-                sl = action.get("stop_loss")
-                tp = action.get("take_profit")
-                risk = abs(ep - sl) if sl is not None else 0.0
+                # ── TP computation (at pre-spread entry + pre-spread risk) ──
+                tp_level = None
+                tp_mode = pending_signal.get("tp_mode")
 
-                self.position = Position(
-                    position_id=self.position_counter,
-                    direction=direction,
-                    entry_time=bar["time"],
-                    entry_index=i,
-                    entry_price=ep,
-                    size=size,
-                    stop_loss=sl,
-                    take_profit=tp,
-                    entry_reason=action.get("reason"),
-                    risk_points=risk,
-                    highest_seen=safe_float(bar["high"]),
-                    lowest_seen=safe_float(bar["low"]),
-                )
-                continue
+                if tp_mode == "r_multiple":
+                    r = float(pending_signal.get("tp_r", 2))
+                    if risk_pts and risk_pts > 0:
+                        tp_level = (ep + risk_pts * r) if direction == "long" \
+                                   else (ep - risk_pts * r)
+                        tp_level = round(tp_level, 4)
 
-            if self.position:
-                pos = self.position
-                sl = pos.stop_loss
-                tp = pos.take_profit
-                hi = safe_float(bar["high"])
-                lo = safe_float(bar["low"])
+                elif pending_signal.get("tp") is not None:
+                    # Absolute TP (existing behavior)
+                    tp_level = float(pending_signal["tp"])
 
-                sl_hit = False
-                tp_hit = False
+                # ── Apply spread (legacy order) ──────────────────
+                trade_spread = self.spread_gen.generate()
+                ep = self.spread_gen.apply_entry(ep, direction, trade_spread)
+                sl_level = self.spread_gen.apply_sl(sl_level, direction, trade_spread)
+                tp_level = self.spread_gen.apply_tp(tp_level, direction, trade_spread)
 
-                if pos.direction == "long":
-                    if sl is not None and lo <= sl:
-                        sl_hit = True
-                    if tp is not None and hi >= tp:
-                        tp_hit = True
-                else:
-                    if sl is not None and hi >= sl:
-                        sl_hit = True
-                    if tp is not None and lo <= tp:
-                        tp_hit = True
+                # ── Recompute risk_pts after spread ──────────────
+                if sl_level is not None:
+                    risk_pts = abs(ep - sl_level)
 
-                if sl_hit:
-                    self._record_trade(bar, sl, "stop_loss")
-                    self.equity = self._mtm(close)
-                    self.equity_curve[-1] = round(self.equity, 2)
-                    self.drawdown_curve[-1] = round(self.peak_equity - self.equity, 2)
-                elif tp_hit:
-                    self._record_trade(bar, tp, "take_profit")
-                    self.equity = self._mtm(close)
-                    self.equity_curve[-1] = round(self.equity, 2)
-                    self.drawdown_curve[-1] = round(self.peak_equity - self.equity, 2)
+                # ── Validation (legacy-exact) ────────────────────
+                valid = True
+                if risk_pts is not None and risk_pts <= 0:
+                    valid = False
+                if sl_level is not None:
+                    if direction == "long"  and sl_level >= ep: valid = False
+                    if direction == "short" and sl_level <= ep: valid = False
+                if tp_level is not None:
+                    if direction == "long"  and tp_level <= ep: valid = False
+                    if direction == "short" and tp_level >= ep: valid = False
 
-        if self.position and self.bars:
-            last = self.bars[-1]
-            self._record_trade(last, safe_float(last["close"]), "end_of_data")
-            self.equity = self._mtm(safe_float(last["close"]))
-            if self.equity_curve:
-                self.equity_curve[-1] = round(self.equity, 2)
-            if self.drawdown_curve:
-                self.peak_equity = max(self.peak_equity, self.equity)
-                self.drawdown_curve[-1] = round(self.peak_equity - self.equity, 2)
+                if valid:
+                    open_t = dict(
+                        id=len(self.trades) + 1,
+                        direction=direction,
+                        entry_bar=i,
+                        entry_time=bar["time"],
+                        entry_price=round(ep, 4),
+                        sl_level=sl_level,
+                        tp_level=tp_level,
+                        risk_pts=risk_pts,
+                        mae=0.0,
+                        mfe=0.0,
+                        bars_held=0,
+                        spread=round(trade_spread, 4),
+                        _engine_sl_ma_key=pending_signal.get("engine_sl_ma_key"),
+                        _engine_tp_ma_key=pending_signal.get("engine_tp_ma_key"),
+                    )
+                    state = direction
+                    just_entered = True
 
-        end_ctx = self._ctx(self.bars[-1] if self.bars else None)
+                pending_signal = None
+
+            # ══════════════════════════════════════════════════════
+            # STEP 2: Check SL/TP + MA cross exits
+            # Only on bars AFTER entry (legacy: not just_entered)
+            # ══════════════════════════════════════════════════════
+            if state != "flat" and open_t is not None and not just_entered:
+                closed = self._check_exit(open_t, bar, i)
+                if closed:
+                    cum = self._close_trade(
+                        open_t, bar, i,
+                        closed["exit_price"],
+                        closed["exit_reason"], cum
+                    )
+                    open_t = None
+                    state = "flat"
+
+            # ── Update MAE/MFE on entry bar (legacy) ─────────────
+            if state != "flat" and open_t is not None and just_entered:
+                d = open_t["direction"]
+                ep2 = open_t["entry_price"]
+                open_t["mae"] = max(open_t.get("mae", 0),
+                                    (ep2 - l) if d == "long" else (h - ep2))
+                open_t["mfe"] = max(open_t.get("mfe", 0),
+                                    (h - ep2) if d == "long" else (ep2 - l))
+
+            # ══════════════════════════════════════════════════════
+            # STEP 3: Get strategy signal
+            # ══════════════════════════════════════════════════════
+            action = {"signal": "HOLD"}
+            if i >= self.lookback:
+                equity_now = self.starting_cap + cum
+                if state != "flat" and open_t:
+                    pts = (c - open_t["entry_price"]) if state == "long" \
+                          else (open_t["entry_price"] - c)
+                    equity_now += points_to_dollars(pts, self.lot_size, self.point_value)
+
+                ctx = self._build_ctx(i, bar, open_t, cum, equity_now, prev_indicators)
+                raw_signal = self.strategy.on_bar(ctx)
+
+                try:
+                    action = validate_signal(raw_signal, i)
+                except ValueError as e:
+                    logger.error(str(e))
+                    action = {"signal": "HOLD"}
+
+            sig = action["signal"]
+
+            # ══════════════════════════════════════════════════════
+            # STEP 4: Process CLOSE signal (strategy wants to exit)
+            #
+            # LEGACY MATCH: After closing, re-call strategy on the
+            # SAME bar with position now flat. This allows MA exit +
+            # new entry on the same bar (legacy runs signal generation
+            # after exit in the same loop iteration).
+            # ══════════════════════════════════════════════════════
+            if action.get("close") and state != "flat" and open_t is not None:
+                reason = action.get("close_reason", "strategy_close")
+                cum = self._close_trade(open_t, bar, i, c, reason, cum)
+                open_t = None
+                state = "flat"
+
+                # Re-call strategy with position now closed
+                if i >= self.lookback:
+                    eq_now = self.starting_cap + cum
+                    ctx2 = self._build_ctx(i, bar, None, cum, eq_now, prev_indicators)
+                    raw2 = self.strategy.on_bar(ctx2)
+                    try:
+                        action = validate_signal(raw2, i)
+                    except ValueError:
+                        action = {"signal": "HOLD"}
+                    sig = action["signal"]
+
+            # ══════════════════════════════════════════════════════
+            # STEP 5: Dynamic SL/TP updates
+            # ══════════════════════════════════════════════════════
+            if state != "flat" and open_t is not None:
+                if "update_sl" in action and action["update_sl"] is not None:
+                    open_t["sl_level"] = float(action["update_sl"])
+                if "update_tp" in action and action["update_tp"] is not None:
+                    open_t["tp_level"] = float(action["update_tp"])
+
+            # ══════════════════════════════════════════════════════
+            # STEP 6: BUY/SELL → set pending (enter NEXT bar open)
+            # Now stores full dict instead of tuple for engine-
+            # computed SL/TP support.
+            # ══════════════════════════════════════════════════════
+            if state == "flat" and sig in ("BUY", "SELL"):
+                direction = "long" if sig == "BUY" else "short"
+                pending_signal = {
+                    "direction": direction,
+                    # Absolute SL/TP (existing)
+                    "sl": action.get("sl"),
+                    "tp": action.get("tp"),
+                    # Engine-computed SL (Phase 3)
+                    "sl_mode": action.get("sl_mode"),
+                    "sl_pts": action.get("sl_pts"),
+                    "sl_ma_key": action.get("sl_ma_key"),
+                    "sl_ma_val": action.get("sl_ma_val"),
+                    # Engine-computed TP (Phase 3)
+                    "tp_mode": action.get("tp_mode"),
+                    "tp_r": action.get("tp_r"),
+                    # Engine-level MA cross exits (Phase 4)
+                    "engine_sl_ma_key": action.get("engine_sl_ma_key"),
+                    "engine_tp_ma_key": action.get("engine_tp_ma_key"),
+                }
+
+            # ══════════════════════════════════════════════════════
+            # STEP 7: Equity / drawdown (centralized dollar math)
+            # ══════════════════════════════════════════════════════
+            if state != "flat" and open_t:
+                pts = (c - open_t["entry_price"]) if state == "long" \
+                      else (open_t["entry_price"] - c)
+                unrealised = points_to_dollars(pts, self.lot_size, self.point_value)
+            else:
+                unrealised = 0.0
+            eq = self.starting_cap + cum + unrealised
+            self.equity_curve.append(round(eq, 2))
+            peak = max(peak, eq)
+            dd = eq - peak
+            self.dd_curve.append(round(dd, 2))
+
+            # ── Save current indicators for next bar's prev_indicators
+            prev_indicators = self._indicators_at(i)
+
+        # ══════════════════════════════════════════════════════════
+        # END: Close open trade at end-of-data (legacy)
+        # ══════════════════════════════════════════════════════════
+        if state != "flat" and open_t:
+            lb = self.bars[-1]
+            cp = float(lb["close"])
+            cum = self._close_trade(open_t, lb, self.n - 1, cp, "end_of_data", cum)
+
+        # ── Strategy cleanup ─────────────────────────────────────
+        end_ctx = self._build_ctx(
+            self.n - 1, self.bars[-1] if self.bars else {},
+            None, cum, self.starting_cap + cum, prev_indicators
+        )
         self.strategy.on_end(end_ctx)
 
         sim_t1 = _time.perf_counter()
         perf["simulation_seconds"] = round(sim_t1 - sim_t0, 4)
 
-        # ── Stats ─────────────────────────────────
+        # ── Stats (shared stats_engine.py) ───────────────────────
         stats_t0 = _time.perf_counter()
-        lot_size = safe_float(self.payload.get("lot_size", self.engine_cfg["default_size"]))
-
         stats = compute_all_stats(
             trades=self.trades,
             equity_curve=self.equity_curve,
             bars=self.bars,
-            starting_capital=self.starting_capital,
-            lot_size=lot_size,
+            starting_capital=self.starting_cap,
+            lot_size=self.lot_size,
         )
         stats_t1 = _time.perf_counter()
         perf["stats_seconds"] = round(stats_t1 - stats_t0, 4)
 
-        # ── Analytics ─────────────────────────────
+        # ── Analytics ────────────────────────────────────────────
         analytics_t0 = _time.perf_counter()
-        analytics = build_analytics(
-            trades=self.trades,
-            bars=self.bars,
-            equity_curve=self.equity_curve,
-            dd_curve=self.drawdown_curve,
-            starting_capital=self.starting_capital,
+        analytics = compute_analytics(
+            self.trades, self.bars,
+            self.equity_curve, self.dd_curve,
+            self.starting_cap,
         )
         analytics_t1 = _time.perf_counter()
         perf["analytics_seconds"] = round(analytics_t1 - analytics_t0, 4)
 
-        # ── Response build ────────────────────────
-        build_t0 = _time.perf_counter()
-        result = {
-            "stats": stats,
-            "metrics": stats,
-            "trades": self.trades,
-            "equity_curve": downsample_curve(self.equity_curve, 1500),
-            "drawdown_curve": downsample_curve(self.drawdown_curve, 1500),
-            "analytics": analytics,
-            "config": {
-                "strategy_id": self.strategy.strategy_id,
-                "parameters": self.params,
-                "starting_capital": self.starting_capital,
-                "range": int(self.payload.get("range", 10)),
-                "lot_size": lot_size,
-            },
-        }
+        # ── Build result ─────────────────────────────────────────
+        result = dict(
+            stats=stats,
+            trades=self.trades,
+            equity_curve=downsample_curve(self.equity_curve, 1500),
+            drawdown_curve=downsample_curve(self.dd_curve, 1500),
+            analytics=analytics,
+            performance=perf,
+            config=dict(
+                strategy_id=self.strategy.strategy_id,
+                parameters=self.params,
+                starting_capital=self.starting_cap,
+                range=int(self.payload.get("range", 10)),
+                lot_size=self.lot_size,
+                point_value=self.point_value,
+            ),
+        )
 
-        result = _clean(result)
+        result = clean_for_json(result)
 
         build_t1 = _time.perf_counter()
-        perf["response_build_seconds"] = round(build_t1 - build_t0, 4)
-        perf["total_seconds"] = round(build_t1 - total_t0, 4)
+        perf["response_build_seconds"] = round(build_t1 - total_t0, 4)
         perf["trade_count"] = len(self.trades)
 
-        result["performance"] = perf
-
-        print(f"  [BACKTEST TIMING] simulation={perf['simulation_seconds']:.3f}s "
-              f"stats={perf['stats_seconds']:.3f}s "
-              f"analytics={perf['analytics_seconds']:.3f}s "
-              f"response_build={perf['response_build_seconds']:.3f}s "
-              f"total={perf['total_seconds']:.3f}s "
-              f"trades={perf['trade_count']}")
+        print(
+            f"  [BACKTEST TIMING] simulation={perf['simulation_seconds']:.3f}s "
+            f"stats={perf['stats_seconds']:.3f}s "
+            f"analytics={perf['analytics_seconds']:.3f}s "
+            f"total={perf['response_build_seconds']:.3f}s "
+            f"trades={perf['trade_count']}"
+        )
 
         return result

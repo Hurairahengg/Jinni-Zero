@@ -1,105 +1,88 @@
-# backend/strategies/base.py
-from __future__ import annotations
+"""
+JINNI ZERO — Strategy Base Class (Signal-Only Interface)
+========================================================
+Strategies are SIGNAL PROVIDERS ONLY.
 
+They output:  BUY / SELL / HOLD / CLOSE + optional SL/TP
+They do NOT:  sizing, PnL, equity, commission, spread, stats
+
+The engine is the single source of truth for execution.
+"""
+from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 
+# ── Valid signal constants ────────────────────────────────────
+SIGNAL_BUY   = "BUY"
+SIGNAL_SELL  = "SELL"
+SIGNAL_HOLD  = "HOLD"
+SIGNAL_CLOSE = "CLOSE"
+
+VALID_SIGNALS = {SIGNAL_BUY, SIGNAL_SELL, SIGNAL_HOLD, SIGNAL_CLOSE, None}
+
+
 class BaseStrategy(ABC):
     """
-    JINNI ZERO — Strategy Base Class
-    --------------------------------
-    The STRATEGY is the brain.
-    The ENGINE is a dumb broker simulator.
+    All strategies MUST subclass this.
 
-    A strategy:
-      • decides WHEN to enter / exit
-      • decides SL / TP placement and updates
-      • decides position size
-      • manages its own state
+    Lifecycle:
+        1. Engine calls build_indicators(params) → precomputes indicator series
+        2. Engine calls on_init(ctx)             → strategy initializes state
+        3. For each bar: engine calls on_bar(ctx) → strategy returns signal
+        4. Engine calls on_end(ctx)              → strategy cleanup
     """
 
-    # ── REQUIRED METADATA ─────────────────────────────────────
-    strategy_id: str = ""
-    name: str = ""
-    description: str = ""
-    version: str = "1.0"
+    # ── Required metadata ─────────────────────────────────────
+    strategy_id:   str = ""
+    name:          str = ""
+    description:   str = ""
+    version:       str = "1.0"
+
+    # ── Lookback: minimum bars before strategy can fire signals ─
+    # Engine will pass HOLD for all bars before this index.
+    # User can override to a higher value via payload.lookback_override.
+    min_lookback:  int = 0
 
     # ==========================================================
-    # METADATA / PARAMETERS
+    # METADATA
     # ==========================================================
     def get_metadata(self) -> Dict[str, Any]:
-        """
-        Returns strategy metadata and parameter schema.
-
-        MUST return:
-          {
-            id: str,
-            name: str,
-            description: str,
-            version: str,
-            parameters: dict   # schema for THIS strategy only
-          }
-        """
         return {
-            "id": self.strategy_id,
-            "name": self.name or self.strategy_id,
-            "description": self.description or "",
-            "version": self.version,
-            "parameters": self.get_parameter_schema(),
+            "id":            self.strategy_id,
+            "name":          self.name or self.strategy_id,
+            "description":   self.description or "",
+            "version":       self.version,
+            "min_lookback":  self.min_lookback,
+            "parameters":    self.get_parameter_schema(),
         }
 
     def get_parameter_schema(self) -> Dict[str, Any]:
-        """
-        Returns a schema dict defining strategy-specific parameters.
-
-        Schema format is consumed directly by the frontend UI.
-        Engine parameters MUST NOT appear here.
-
-        Override in strategy if params are needed.
-        """
-        return getattr(self, 'parameters', {})
+        """Override to declare strategy-specific parameters for UI."""
+        return getattr(self, "parameters", {})
 
     def get_default_parameters(self) -> Dict[str, Any]:
-        """
-        Returns default values for strategy parameters.
-        Keys must match get_parameter_schema().
-        """
         schema = self.get_parameter_schema()
         defaults = {}
         for k, spec in schema.items():
-            if isinstance(spec, dict) and 'default' in spec:
-                defaults[k] = spec['default']
+            if isinstance(spec, dict) and "default" in spec:
+                defaults[k] = spec["default"]
         return defaults
 
     def validate_parameters(self, raw_params: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate / clamp / coerce incoming parameters.
-
-        Must return a CLEAN dict used by the engine.
-        Default behavior: merge defaults with raw input.
-        """
         params = dict(self.get_default_parameters())
         for k, v in (raw_params or {}).items():
             params[k] = v
         return params
 
     # ==========================================================
-    # INDICATORS
+    # INDICATORS (optional — engine precomputes these)
     # ==========================================================
     def build_indicators(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Return indicator specs to be precomputed by the engine.
-
-        Each spec:
-          {
-            key: "ema_55",
-            kind: "EMA" | "SMA" | "WMA" | "HMA" | "VWAP" | "CHOPPINESS" | etc,
-            period: int,
-            source: "close" | "open" | "high" | "low"
-          }
-
-        Override if indicators are needed.
+        Return indicator specs for engine precomputation.
+        Each spec: {"key": "hma_200", "kind": "HMA", "period": 200, "source": "close"}
+        Strategy can also precompute its own in on_init() using ctx.bars.
         """
         return []
 
@@ -107,65 +90,52 @@ class BaseStrategy(ABC):
     # LIFECYCLE HOOKS
     # ==========================================================
     def on_init(self, ctx: Any) -> None:
-        """
-        Called ONCE before the first bar.
-        Strategy may initialize ctx.state here.
-        """
+        """Called ONCE before first bar. Initialize ctx.state here."""
         pass
 
     def on_end(self, ctx: Any) -> None:
-        """
-        Called ONCE after the final bar.
-        """
+        """Called ONCE after last bar."""
         pass
 
     # ==========================================================
-    # MAIN STRATEGY LOGIC
+    # MAIN — SIGNAL GENERATION (the ONLY job of a strategy)
     # ==========================================================
     @abstractmethod
     def on_bar(self, ctx: Any) -> Optional[Dict[str, Any]]:
         """
         Called once per bar.
 
-        ctx provides:
-          ctx.index
-          ctx.bar
-          ctx.bars
-          ctx.indicators
-          ctx.ind_series
-          ctx.position
-          ctx.balance
-          ctx.equity
-          ctx.trades
-          ctx.params
-          ctx.state   ← mutable dict, persists across bars
+        ctx provides (READ-ONLY except ctx.state):
+            ctx.index       — current bar index
+            ctx.bar         — current OHLCV dict
+            ctx.bars        — all bars (for lookback)
+            ctx.indicators  — engine-precomputed indicator values at i
+            ctx.ind_series  — full indicator series (for lookback)
+            ctx.position    — PositionState (frozen dataclass, read-only)
+            ctx.params      — strategy parameters
+            ctx.state       — mutable dict, persists across bars
+            ctx.trades      — closed trades list (read-only)
+            ctx.equity      — current mark-to-market equity
+            ctx.balance     — current realized balance
 
-        Return one of:
+        MUST return one of:
 
-        ENTER:
-          {
-            "enter": "long" | "short",
-            "size": float | None,
-            "stop_loss": float | None,
-            "take_profit": float | None,
-            "entry_price": float | None,
-            "reason": str | None
-          }
+        ENTRY:
+            {"signal": "BUY",  "sl": float|None, "tp": float|None}
+            {"signal": "SELL", "sl": float|None, "tp": float|None}
 
-        EXIT:
-          {
-            "exit": True,
-            "exit_price": float | None,
-            "reason": str | None
-          }
+        HOLD (no action):
+            {"signal": "HOLD"}  or  None
 
-        UPDATE:
-          {
-            "update_sl": float | None,
-            "update_tp": float | None
-          }
+        CLOSE open position:
+            {"signal": "CLOSE", "close_reason": "my_reason"}
 
-        NOTHING:
-          {} or None
+        CLOSE + immediately signal new direction (flip):
+            {"signal": "SELL", "close": True, "close_reason": "flip_short"}
+
+        DYNAMIC SL/TP UPDATE (while in position):
+            {"signal": "HOLD", "update_sl": float, "update_tp": float}
+
+        ❌ NEVER return: size, entry_price, PnL, balance, equity, commission.
         """
         raise NotImplementedError("Strategy must implement on_bar()")

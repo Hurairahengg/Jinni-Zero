@@ -111,6 +111,12 @@
               <option value="strategy">Load Strategy Mode</option>
             </select>
           </div>
+          <div class="bt-field">
+            <label class="bt-label">Point Value ($/pt/lot)</label>
+            <input class="bt-input" type="number" id="bt_pointValue"
+                  value="1" min="0.01" max="10000" step="0.01"/>
+            <span class="bt-hint" id="bt_pvHint">1 pt × 1 lot = $1.00</span>
+          </div>
           <div class="bt-toggle-label">
             Manual Mode keeps your existing legacy controls. Load Strategy Mode auto-loads Python strategy schemas + engine settings.
           </div>
@@ -337,7 +343,7 @@
           </div>
         </div>
         <!-- SPREAD SIMULATION -->
-        <div class="bt-section bt-manual-only">
+        <div class="bt-section">
           <div class="bt-section-title">SPREAD SIMULATION</div>
           <div class="bt-field">
             <label class="bt-label">Random Spread</label>

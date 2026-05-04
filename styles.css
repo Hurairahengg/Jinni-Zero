@@ -856,6 +856,7 @@ html, body {
   align-items: center;
   gap: 8px;
 }
+
 .bt-lotsize-hint {
   font-size: 0.58rem;
   color: var(--text-dim);

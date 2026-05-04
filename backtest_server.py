@@ -5,13 +5,20 @@ POST /api/backtest        →  full results JSON
 POST /api/backtest/stream →  NDJSON streaming progress + result
 GET  /api/health          →  ok
 """
-import json, math, os, random, time as _time
-from collections import defaultdict
-from datetime import datetime, timezone
+import json, math, os, time as _time
 from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
+from backend.dollar_math import points_to_dollars, finalize_trade_pnl
 from backend.strategy_api import strategy_api
 from backend.stats_engine import compute_all_stats, downsample_curve as ds_curve
+from backend.shared import (
+    precompute_ma,
+    get_or_compute_ma,
+    SpreadGenerator,
+    calc_comm,
+    compute_analytics,
+    clean_for_json,
+)
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -26,6 +33,7 @@ def _parse_datetime_param(val):
     if not val or not isinstance(val, str) or not val.strip():
         return None
     val = val.strip()
+    from datetime import datetime, timezone
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
@@ -64,120 +72,7 @@ def load_bars(range_pt, bar_range, start_date=None, end_date=None):
     return bars
 
 # ════════════════════════════════════════════════════════════════════
-#  O(n) PRECOMPUTATION FUNCTIONS
-# ════════════════════════════════════════════════════════════════════
-
-def _precompute_sma(closes, period):
-    n = len(closes)
-    out = [None] * n
-    if period < 1 or n < period:
-        return out
-    s = 0.0
-    for i in range(period):
-        s += closes[i]
-    out[period - 1] = s / period
-    for i in range(period, n):
-        s += closes[i] - closes[i - period]
-        out[i] = s / period
-    return out
-
-def _precompute_ema(closes, period):
-    n = len(closes)
-    out = [None] * n
-    if period < 1 or n < period:
-        return out
-    k = 2.0 / (period + 1)
-    s = 0.0
-    for i in range(period):
-        s += closes[i]
-    ema = s / period
-    out[period - 1] = ema
-    for i in range(period, n):
-        ema = closes[i] * k + ema * (1 - k)
-        out[i] = ema
-    return out
-
-def _precompute_wma(closes, period):
-    n = len(closes)
-    p = period
-    out = [None] * n
-    if p < 1 or n < p:
-        return out
-    denom = p * (p + 1) / 2.0
-    ws = 0.0
-    s = 0.0
-    for j in range(p):
-        s += closes[j]
-        ws += closes[j] * (j + 1)
-    out[p - 1] = ws / denom
-    for i in range(p, n):
-        ws = ws + p * closes[i] - s
-        s = s + closes[i] - closes[i - p]
-        out[i] = ws / denom
-    return out
-
-def _precompute_hma(closes, period):
-    n = len(closes)
-    p = period
-    half = p // 2
-    sq = int(math.floor(math.sqrt(p)))
-    out = [None] * n
-    if half < 1 or sq < 1:
-        return out
-    wma_full = _precompute_wma(closes, p)
-    wma_half = _precompute_wma(closes, half)
-    diff = [None] * n
-    diff_start = None
-    for i in range(n):
-        if wma_full[i] is not None and wma_half[i] is not None:
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
-            if diff_start is None:
-                diff_start = i
-    if diff_start is None:
-        return out
-    valid_diff = []
-    valid_map = []
-    for i in range(diff_start, n):
-        if diff[i] is not None:
-            valid_diff.append(diff[i])
-            valid_map.append(i)
-        else:
-            break
-    if len(valid_diff) < sq:
-        return out
-    wma_final = _precompute_wma(valid_diff, sq)
-    for j in range(len(wma_final)):
-        if wma_final[j] is not None:
-            out[valid_map[j]] = wma_final[j]
-    return out
-
-def _precompute_ma(closes, ma_type, period):
-    t = ma_type.upper()
-    if t == "SMA": return _precompute_sma(closes, period)
-    if t == "EMA": return _precompute_ema(closes, period)
-    if t == "WMA": return _precompute_wma(closes, period)
-    if t == "HMA": return _precompute_hma(closes, period)
-    return [None] * len(closes)
-
-# ── Cross-run cache ───────────────────────────────────────────────
-_ma_cache = {}
-_ma_cache_dataset_id = None
-
-def _get_or_compute_ma(closes, ma_type, period, dataset_id=None):
-    global _ma_cache, _ma_cache_dataset_id
-    if dataset_id is not None and dataset_id != _ma_cache_dataset_id:
-        _ma_cache = {}
-        _ma_cache_dataset_id = dataset_id
-    key = (ma_type.upper(), period)
-    if key not in _ma_cache:
-        t0 = _time.perf_counter()
-        _ma_cache[key] = _precompute_ma(closes, ma_type, period)
-        dt = _time.perf_counter() - t0
-        print(f"  [CACHE] Computed {ma_type.upper()}({period}) over {len(closes)} bars in {dt*1000:.1f}ms")
-    return _ma_cache[key]
-
-# ════════════════════════════════════════════════════════════════════
-#  INDICATOR ENGINE
+#  INDICATOR ENGINE  (Legacy-specific — uses shared MA functions)
 # ════════════════════════════════════════════════════════════════════
 class IndicatorEngine:
     def __init__(self, ma_type, period):
@@ -189,7 +84,7 @@ class IndicatorEngine:
         self._ema_val = None
 
     def precompute(self, closes, dataset_id=None):
-        self._precomputed = _get_or_compute_ma(closes, self.ma_type, self.period, dataset_id)
+        self._precomputed = get_or_compute_ma(closes, self.ma_type, self.period, dataset_id)
         self._idx = -1
 
     def update(self, close):
@@ -264,87 +159,7 @@ class MultiIndicatorEngine:
         return [eng.update(close) for eng in self.engines]
 
 # ════════════════════════════════════════════════════════════════════
-#  COMMISSION
-# ════════════════════════════════════════════════════════════════════
-def calc_comm(cfg, contracts=1):
-    t = cfg.get("type","flat"); a = float(cfg.get("amount",0))
-    if t=="flat":         return a
-    if t=="per_contract": return a*contracts*2
-    if t=="per_side":     return a*2
-    return a
-
-# ════════════════════════════════════════════════════════════════════
-#  SPREAD GENERATOR
-# ════════════════════════════════════════════════════════════════════
-class SpreadGenerator:
-    """Generates realistic random spread per trade."""
-
-    def __init__(self, config):
-        self.enabled = bool(config.get("enabled", False))
-        self.min_spread = float(config.get("min", 0.0))
-        self.max_spread = float(config.get("max", 0.0))
-
-        seed = config.get("seed")
-        if seed is not None and seed != "" and seed != 0:
-            self._rng = random.Random(int(seed))
-        else:
-            self._rng = random.Random()
-
-        if self.min_spread > self.max_spread:
-            self.min_spread, self.max_spread = self.max_spread, self.min_spread
-
-        if self.min_spread < 0:
-            self.min_spread = 0
-        if self.max_spread < 0:
-            self.max_spread = 0
-
-        if self.enabled:
-            print(f"  [SPREAD] Enabled: ${self.min_spread:.4f} - ${self.max_spread:.4f}"
-                  f"  seed={'deterministic' if seed else 'random'}")
-
-    def generate(self):
-        if not self.enabled or self.max_spread <= 0:
-            return 0.0
-        return self._rng.uniform(self.min_spread, self.max_spread)
-
-    def apply_entry(self, price, direction, spread):
-        if spread <= 0:
-            return price
-        half = spread / 2.0
-        if direction == "long":
-            return price + half
-        else:
-            return price - half
-
-    def apply_exit(self, price, direction, spread):
-        if spread <= 0:
-            return price
-        half = spread / 2.0
-        if direction == "long":
-            return price - half
-        else:
-            return price + half
-
-    def apply_sl(self, sl_level, direction, spread):
-        if sl_level is None or spread <= 0:
-            return sl_level
-        half = spread / 2.0
-        if direction == "long":
-            return sl_level + half
-        else:
-            return sl_level - half
-
-    def apply_tp(self, tp_level, direction, spread):
-        if tp_level is None or spread <= 0:
-            return tp_level
-        half = spread / 2.0
-        if direction == "long":
-            return tp_level + half
-        else:
-            return tp_level - half
-
-# ════════════════════════════════════════════════════════════════════
-#  BACKTEST ENGINE
+#  BACKTEST ENGINE  (LEGACY — UNTOUCHED LOGIC)
 # ════════════════════════════════════════════════════════════════════
 class BacktestEngine:
     def __init__(self, bars, config):
@@ -359,6 +174,7 @@ class BacktestEngine:
         self.comm_cfg      = config.get("commission", {})
         self.gating_cfg    = config.get("gating", {})
         self.lot_size      = float(config.get("lot_size", 1.0))
+        self.point_value   = float(config.get("point_value", 1.0))
         self.starting_cap  = float(config.get("starting_capital", 10000.0))
         self.ambiguous_mode = config.get("ambiguous_bar_mode", "conservative")
         self.require_candle_confirm = config.get("require_candle_confirm", True)
@@ -416,7 +232,7 @@ class BacktestEngine:
         yield from self._run_generator()
         yield {"type": "result", "data": self._build_result()}
 
-    # ── Core loop ───────────────────────────────────────────────
+    # ── Core loop (LEGACY — UNTOUCHED) ──────────────────────────
     def _run_generator(self):
         state = "flat"
         open_t = None
@@ -539,7 +355,7 @@ class BacktestEngine:
             if state != "flat" and open_t:
                 pts = (c - open_t["entry_price"]) if state == "long" \
                       else (open_t["entry_price"] - c)
-                unrealised = pts * self.lot_size
+                unrealised = points_to_dollars(pts, self.lot_size, self.point_value)
             else:
                 unrealised = 0.0
             eq = self.starting_cap + cum + unrealised
@@ -601,8 +417,10 @@ class BacktestEngine:
             elif self.entry_mode == "ma_cross" and len(self.ma_defs) >= 2 and i > 0:
                 pm = ma_hist[i-1]
                 if None not in (mv[0], mv[1], pm[0], pm[1]):
-                    if pm[0] <= pm[1] and mv[0] > mv[1]: sig = "long"
-                    elif pm[0] >= pm[1] and mv[0] < mv[1]: sig = "short"
+                    if pm[0] <= pm[1] and mv[0] > mv[1]:
+                        sig = "long"
+                    elif pm[0] >= pm[1] and mv[0] < mv[1]:
+                        sig = "short"
 
             elif self.entry_mode == "trend_filter" and i > 0:
                 lm = mv[-1]; plm = ma_hist[i-1][-1]; pc = self.bars[i-1]["close"]
@@ -644,7 +462,7 @@ class BacktestEngine:
             closed["cumulative_pnl"] = round(cum,2)
             self.trades.append(closed)
 
-    # ── SL computation ──────────────────────────────────────────
+    # ── SL computation (LEGACY — UNTOUCHED) ─────────────────────
     def _compute_sl(self, direction, entry_price, sl_ma_val):
         mode = self.sl_mode
         if mode == "fixed":
@@ -682,7 +500,7 @@ class BacktestEngine:
                 return round(tp, 4)
         return None
 
-    # ── Exit evaluation ─────────────────────────────────────────
+    # ── Exit evaluation (LEGACY — UNTOUCHED) ────────────────────
     def _check_exit(self, t, bar, bi, sl_ma_val, tp_ma_val):
         d  = t["direction"]; ep = t["entry_price"]
         sl = t.get("sl_level")
@@ -741,40 +559,12 @@ class BacktestEngine:
                 "bars_held": bi - t["entry_bar"]}
 
     def _finalize_trade(self, closed):
-        d = closed["direction"]
-        ep = closed["entry_price"]
-        xp = closed["exit_price"]
-
-        dir_sign = 1 if d == "long" else -1
-        points_pnl = (xp - ep) * dir_sign
-
-        sl = closed.get("sl_level")
-        rp = closed.get("risk_pts")
-        if sl is not None:
-            rp = abs(ep - sl)
-        if rp is None or rp <= 0:
-            rp = None
-
-        gross_dollar = points_pnl * self.lot_size
         commission = calc_comm(self.comm_cfg)
-        net_dollar = gross_dollar - commission
-
-        r_mult = None
-        if rp is not None and rp > 0:
-            r_mult = points_pnl / rp
-
-        risk_dollar = rp * self.lot_size if rp and rp > 0 else None
-
-        closed.update(
-            points_pnl = round(points_pnl, 4),
-            gross_pnl  = round(gross_dollar, 2),
-            commission = round(commission, 2),
-            net_pnl    = round(net_dollar, 2),
-            net_pnl_r  = round(r_mult, 3) if r_mult is not None else None,
-            risk_pts   = round(rp, 4) if rp is not None else None,
-            risk_dollar= round(risk_dollar, 2) if risk_dollar else None,
-            mae_dollar = round(closed.get("mae", 0) * self.lot_size, 2),
-            mfe_dollar = round(closed.get("mfe", 0) * self.lot_size, 2),
+        finalize_trade_pnl(
+            closed,
+            lot_size=self.lot_size,
+            point_value=self.point_value,
+            commission=commission,
         )
 
     def _build_result(self):
@@ -819,133 +609,6 @@ class BacktestEngine:
 
         return result
 
-# ════════════════════════════════════════════════════════════════════
-#  ANALYTICS + MONTE CARLO
-# ════════════════════════════════════════════════════════════════════
-def compute_analytics(trades, bars, equity_curve, dd_curve, starting_cap=10000):
-    if not trades: return {}
-    nets = [t["net_pnl"] for t in trades]
-    r_mul = [t.get("net_pnl_r") or 0 for t in trades]
-    r_hist = _histogram(r_mul, bins=20)
-
-    W = 20
-    roll_wr=[]; roll_exp=[]; roll_pf=[]; roll_sharpe=[]
-    for i in range(len(trades)):
-        sl = max(0,i-W+1); chunk = [t["net_pnl"] for t in trades[sl:i+1]]
-        wc = [x for x in chunk if x > 0]; lc = [x for x in chunk if x <= 0]
-        wrc = len(wc)/len(chunk) if chunk else 0
-        awc = sum(wc)/len(wc) if wc else 0
-        alc = sum(lc)/len(lc) if lc else 0
-        roll_wr.append(round(wrc*100,1))
-        roll_exp.append(round(wrc*awc+(1-wrc)*alc,2))
-        gwa=sum(wc); gla=abs(sum(lc))
-        roll_pf.append(round(gwa/gla,3) if gla else None)
-        if len(chunk) > 1:
-            mu=sum(chunk)/len(chunk); var=sum((x-mu)**2 for x in chunk)/(len(chunk)-1)
-            sd=math.sqrt(var) if var>0 else 0
-            roll_sharpe.append(round((mu/sd)*math.sqrt(252),3) if sd else None)
-        else: roll_sharpe.append(None)
-
-    dur_hist = _histogram([t.get("bars_held",0) for t in trades], bins=15)
-    mae_mfe = [dict(mae=round(t.get("mae",0),2), mfe=round(t.get("mfe",0),2),
-                     win=t["net_pnl"]>0) for t in trades]
-    ret_scatter = [dict(x=i+1, y=round(r,3), win=r>0) for i,r in enumerate(r_mul)]
-
-    by_hour = defaultdict(list)
-    for t in trades:
-        try: hh=datetime.fromtimestamp(t["entry_time"],tz=timezone.utc).hour; by_hour[hh].append(t["net_pnl"])
-        except: pass
-    hour_perf = {str(hh): dict(trades=len(v), net=round(sum(v),2),
-                 wr=round(len([x for x in v if x>0])/len(v)*100,1)) for hh,v in by_hour.items()}
-
-    DOW=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
-    by_dow=defaultdict(list)
-    for t in trades:
-        try: d=datetime.fromtimestamp(t["entry_time"],tz=timezone.utc).weekday(); by_dow[d].append(t["net_pnl"])
-        except: pass
-    dow_perf={DOW[d]: dict(trades=len(v), net=round(sum(v),2),
-              wr=round(len([x for x in v if x>0])/len(v)*100,1)) for d,v in by_dow.items()}
-
-    MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-    by_mon=defaultdict(list)
-    for t in trades:
-        try: m=datetime.fromtimestamp(t["entry_time"],tz=timezone.utc).month-1; by_mon[m].append(t["net_pnl"])
-        except: pass
-    mon_perf={MONTHS[m]: dict(trades=len(v), net=round(sum(v),2),
-              wr=round(len([x for x in v if x>0])/len(v)*100,1)) for m,v in by_mon.items()}
-
-    bar_ranges=[b["high"]-b["low"] for b in bars]; vol_regime={}
-    if bar_ranges:
-        med_rng=sorted(bar_ranges)[len(bar_ranges)//2]
-        by_vol={"low_vol":[],"high_vol":[]}
-        for t in trades:
-            bi=t.get("entry_bar",0)
-            if bi<len(bar_ranges):
-                k="low_vol" if bar_ranges[bi]<med_rng else "high_vol"
-                by_vol[k].append(t["net_pnl"])
-        vol_regime={k: dict(trades=len(v), net=round(sum(v),2),
-                    wr=round(len([x for x in v if x>0])/len(v)*100,1) if v else 0)
-                    for k,v in by_vol.items()}
-
-    chop_by={"trending":[],"choppy":[]}
-    for t in trades:
-        bi=t.get("entry_bar",0)
-        if bi>=3:
-            last3=[bars[bi-k]["close"]-bars[bi-k]["open"] for k in range(1,4)]
-            same_dir=all(x>0 for x in last3) or all(x<0 for x in last3)
-            chop_by["trending" if same_dir else "choppy"].append(t["net_pnl"])
-    chop_regime={k: dict(trades=len(v), net=round(sum(v),2),
-                 wr=round(len([x for x in v if x>0])/len(v)*100,1) if v else 0)
-                 for k,v in chop_by.items()}
-
-    total_comm=sum(t.get("commission",0) for t in trades)
-    gross_abs=sum(abs(t["gross_pnl"]) for t in trades)
-    comm_summary=dict(
-        total=round(total_comm,2),
-        per_trade=round(total_comm/len(trades),2) if trades else 0,
-        pct_of_gross=round(total_comm/gross_abs*100,2) if gross_abs else 0,
-        net_without_comm=round(sum(t["gross_pnl"] for t in trades),2),
-        net_with_comm=round(sum(t["net_pnl"] for t in trades),2))
-
-    return dict(
-        r_histogram=r_hist,
-        rolling=dict(win_rate=roll_wr, expectancy=roll_exp,
-                     profit_factor=roll_pf, sharpe=roll_sharpe),
-        duration_histogram=dur_hist, mae_mfe=mae_mfe,
-        return_scatter=ret_scatter,
-        time_of_day=hour_perf, day_of_week=dow_perf, by_month=mon_perf,
-        regime=dict(volatility=vol_regime, choppiness=chop_regime),
-        monte_carlo={}, commission=comm_summary)
-
-def _histogram(data, bins=20):
-    if not data: return dict(edges=[], counts=[])
-    mn=min(data); mx=max(data)
-    if mn==mx: return dict(edges=[mn,mx], counts=[len(data)])
-    w=(mx-mn)/bins
-    counts=[0]*bins; edges=[round(mn+i*w,3) for i in range(bins+1)]
-    for x in data: counts[min(int((x-mn)/w),bins-1)] += 1
-    return dict(edges=edges, counts=counts)
-
-# ════════════════════════════════════════════════════════════════════
-#  OPTIMIZED _clean (fast-path for numeric lists)
-# ════════════════════════════════════════════════════════════════════
-def _clean(obj):
-    if obj is None or isinstance(obj, (str, int, bool)):
-        return obj
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, list):
-        if obj and isinstance(obj[0], (int, float)):
-            return [
-                (None if isinstance(v, float) and (math.isnan(v) or math.isinf(v)) else v)
-                for v in obj
-            ]
-        return [_clean(v) for v in obj]
-    if isinstance(obj, dict):
-        return {k: _clean(v) for k, v in obj.items()}
-    return obj
 
 # ════════════════════════════════════════════════════════════════════
 #  FLASK ROUTES (WITH TIMING)
@@ -998,6 +661,7 @@ def _validate_and_load(cfg):
 
     return bars, cfg
 
+
 @app.route("/api/backtest", methods=["POST"])
 def run_backtest():
     try:
@@ -1009,7 +673,7 @@ def run_backtest():
         engine=BacktestEngine(bars,cfg); result=engine.run()
         sim_t1 = _time.perf_counter()
 
-        result = _clean(result)
+        result = clean_for_json(result)
 
         json_t0 = _time.perf_counter()
         response_body = json.dumps(result)
@@ -1018,7 +682,6 @@ def run_backtest():
         payload_kb = len(response_body) / 1024
         route_t1 = _time.perf_counter()
 
-        # Inject timing into performance object
         perf = result.get("performance", {})
         perf["simulation_seconds"] = round(sim_t1 - sim_t0, 4)
         perf["json_seconds"] = round(json_t1 - json_t0, 4)
@@ -1040,6 +703,7 @@ def run_backtest():
         import traceback; traceback.print_exc()
         return jsonify(error=str(e)),500
 
+
 @app.route("/api/backtest/stream", methods=["POST"])
 def run_backtest_stream():
     try:
@@ -1050,12 +714,14 @@ def run_backtest_stream():
     engine=BacktestEngine(bars,cfg)
     def generate():
         for msg in engine.run_streaming():
-            yield json.dumps(_clean(msg))+"\n"
+            yield json.dumps(clean_for_json(msg))+"\n"
     return Response(stream_with_context(generate()), mimetype='application/x-ndjson',
         headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no','Access-Control-Allow-Origin':'*'})
 
+
 @app.route("/api/health", methods=["GET"])
 def health(): return jsonify(status="ok"),200
+
 
 if __name__ == "__main__":
     print("="*52+"\n  NQ Backtest Server  http://localhost:5000\n"+"="*52)

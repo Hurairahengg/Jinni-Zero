@@ -34,6 +34,10 @@
   var _lastRenderData = null;
   var _lastConfig = null;
 
+  // ✅ FIX: once results have rendered, do NOT allow late progress updates
+  // to re-show progressWrap and hide the dashboard.
+  var __btHasRenderedResult = false;
+
   // ── Performance caps (lowered for speed) ──────────────────────────
   var MAX_LINE_POINTS = 800;
   var MAX_BAR_POINTS = 200;
@@ -322,13 +326,19 @@
 
   // ── Lot size hint ─────────────────────────────────────────────────
   function updateLotHint() {
-    var ls = parseFloat((document.getElementById('bt_lotSize') || {}).value || '1') || 1;
-    var hint = document.getElementById('bt_lotHint');
-    if (hint) hint.textContent = '1 pt = $' + ls.toFixed(ls < 0.1 ? 3 : 2);
-  }
-  var lotSizeEl = document.getElementById('bt_lotSize');
-  if (lotSizeEl) lotSizeEl.addEventListener('input', updateLotHint);
-  updateLotHint();
+      var ls = parseFloat((document.getElementById('bt_lotSize') || {}).value || '1') || 1;
+      var pv = parseFloat((document.getElementById('bt_pointValue') || {}).value || '1') || 1;
+      var dollarsPerPt = ls * pv;
+      var hint = document.getElementById('bt_lotHint');
+      if (hint) hint.textContent = '1 pt = $' + dollarsPerPt.toFixed(dollarsPerPt < 0.1 ? 3 : 2);
+      var pvHint = document.getElementById('bt_pvHint');
+      if (pvHint) pvHint.textContent = '1 pt × ' + ls + ' lot = $' + dollarsPerPt.toFixed(2);
+    }
+    var lotSizeEl = document.getElementById('bt_lotSize');
+    if (lotSizeEl) lotSizeEl.addEventListener('input', updateLotHint);
+    var pvEl = document.getElementById('bt_pointValue');
+    if (pvEl) pvEl.addEventListener('input', updateLotHint);
+    updateLotHint();
 
   // ════════════════════════════════════════════════════════════════════
   // CONFIG COLLECTION (legacy/manual mode)
@@ -352,6 +362,7 @@
       bar_range: parseInt((document.getElementById('bt_barRange') || {}).value || '1000', 10),
       starting_capital: parseFloat((document.getElementById('bt_startingCapital') || {}).value || '10000') || 10000,
       lot_size: parseFloat((document.getElementById('bt_lotSize') || {}).value || '1.0') || 1.0,
+      point_value: parseFloat((document.getElementById('bt_pointValue') || {}).value || '1') || 1.0,
       mas: mas,
       entry: (document.getElementById('bt_entry') || {}).value || 'above_all_mas',
       require_candle_confirm: !!((document.getElementById('bt_candleConfirm') || {}).checked),
@@ -377,11 +388,11 @@
         amount: parseFloat((document.getElementById('bt_commission') || {}).value || '4') || 4,
       },
       spread: {
-              enabled: !!((document.getElementById('bt_spreadEnabled') || {}).checked),
-              min: parseFloat((document.getElementById('bt_spreadMin') || {}).value || '0') || 0,
-              max: parseFloat((document.getElementById('bt_spreadMax') || {}).value || '0') || 0,
-              seed: parseInt((document.getElementById('bt_spreadSeed') || {}).value || '0', 10) || 0,
-            },
+        enabled: !!((document.getElementById('bt_spreadEnabled') || {}).checked),
+        min: parseFloat((document.getElementById('bt_spreadMin') || {}).value || '0') || 0,
+        max: parseFloat((document.getElementById('bt_spreadMax') || {}).value || '0') || 0,
+        seed: parseInt((document.getElementById('bt_spreadSeed') || {}).value || '0', 10) || 0,
+      },
       ambiguous_bar_mode: (document.getElementById('bt_ambiguousMode') || {}).value || 'conservative',
       monte_carlo_runs: parseInt((document.getElementById('bt_mcRuns') || {}).value || '0', 10) || 0
     };
@@ -926,7 +937,8 @@
   // ════════════════════════════════════════════════════════════════════
   function kpiCard(label, value, colorClass, subtext) {
     colorClass = colorClass || ''; subtext = subtext || '';
-    return '<div class="bt-kpi"><div class="bt-kpi-label">' + label + '</div><div class="bt-kpi-value ' + colorClass + '">' + value + '</div>' + (subtext ? '<div class="bt-kpi-sub">' + subtext + '</div>' : '') + '</div>';
+    return '<div class="bt-kpi"><div class="bt-kpi-label">' + label + '</div><div class="bt-kpi-value ' + colorClass + '">' + value + '</div>' +
+      (subtext ? '<div class="bt-kpi-sub">' + subtext + '</div>' : '') + '</div>';
   }
 
   function colorClass(v) {
@@ -1128,7 +1140,6 @@
         '<div class="bt-trade-cell">' + size + '</div>' +
         '<div class="bt-trade-cell ' + grossCls + '">' + (t.gross_pnl != null ? ((toNumber(t.gross_pnl, 0) >= 0 ? '+' : '') + toNumber(t.gross_pnl, 0).toFixed(2)) : '—') + '</div>' +
         '<div class="bt-trade-cell">' + (t.commission != null ? toNumber(t.commission, 0).toFixed(2) : '—') + '</div>' +
-        '<div class="bt-trade-cell">' + (t.spread != null ? Number(t.spread).toFixed(4) : '—') + '</div>' +
         '<div class="bt-trade-cell ' + netCls + '">' + (t.net_pnl != null ? ((toNumber(t.net_pnl, 0) >= 0 ? '+' : '') + toNumber(t.net_pnl, 0).toFixed(2)) : '—') + '</div>' +
         '<div class="bt-trade-cell">' + (t.bars_held != null ? t.bars_held : '—') + '</div>' +
         '</div>';
@@ -1431,6 +1442,9 @@
       btn.classList.add('running');
       btn.innerHTML = '<span class="bt-run-icon">⟳</span> RUNNING…';
 
+      // ✅ reset result lock when starting a new run
+      __btHasRenderedResult = false;
+
       showProgress();
       setStep('step_load');
       if (typeof window.clearBacktestMarkers === 'function') window.clearBacktestMarkers();
@@ -1485,7 +1499,7 @@
         setStep('step_charts');
         await delay(80);
         setStep('step_done');
-        await delay(300);
+        await delay(80);
 
         window.btRenderAnyResult(finalData, config);
 
@@ -1505,7 +1519,7 @@
             setStep('step_charts');
             await delay(80);
             setStep('step_done');
-            await delay(300);
+            await delay(80);
             window.btRenderAnyResult(data, config);
           } catch (fallbackErr) {
             console.error(fallbackErr);
@@ -1525,9 +1539,26 @@
   // ════════════════════════════════════════════════════════════════════
   // EXPOSED RENDER / PROGRESS API FOR STRATEGY MODE
   // ════════════════════════════════════════════════════════════════════
+
   window.btShowRunnerState = function (state) {
     try {
+      // ✅ FIX: Reset render lock ONLY when a genuinely new run starts
+      if (state && state.stepId === 'step_load') {
+        __btHasRenderedResult = false;
+      }
+
+      // ✅ FIX: once results are rendered, IGNORE late progress updates
+      // that would re-show progressWrap and hide dashboard.
+      if (__btHasRenderedResult) {
+        var pw = document.getElementById('bt_progressWrap');
+        if (pw) pw.style.display = 'none';
+        var ls = document.getElementById('bt_liveStats');
+        if (ls) ls.style.display = 'none';
+        return;
+      }
+
       showProgress();
+
       if (state && state.stepId) setStep(state.stepId);
       var pct = (state && state.pct != null) ? state.pct : 0;
       var bar = document.getElementById('bt_progressBar');
@@ -1536,18 +1567,32 @@
       if (bar) bar.style.width = pct + '%';
       if (pctEl) pctEl.textContent = Math.round(pct) + '%';
       if (label && state && state.label) label.textContent = state.label;
-      if (state && state.live) updateLiveProgress({ pct: pct, bar: state.live.bar || 0, total: state.live.total || 0, equity: state.live.equity, drawdown: state.live.drawdown, open_trade: state.live.open_trade, last_closed_pnl: state.live.last_closed_pnl });
+      if (state && state.live) updateLiveProgress({
+        pct: pct,
+        bar: state.live.bar || 0,
+        total: state.live.total || 0,
+        equity: state.live.equity,
+        drawdown: state.live.drawdown,
+        open_trade: state.live.open_trade,
+        last_closed_pnl: state.live.last_closed_pnl
+      });
     } catch (err) { console.error(err); }
   };
 
   window.btShowRunnerError = function (message) {
+    // ✅ reset render lock on error
+    __btHasRenderedResult = false;
+
     hideProgress();
     var dash = document.getElementById('bt_dashboard');
     var empty = document.getElementById('bt_empty');
     if (dash) dash.style.display = 'none';
     if (empty) {
       empty.style.display = '';
-      empty.innerHTML = '<div class="bt-empty-icon" style="color:var(--bear)">✕</div><div class="bt-empty-title" style="color:var(--bear)">Error</div><div class="bt-empty-sub">' + String(message || 'Unknown error') + '</div>';
+      empty.innerHTML =
+        '<div class="bt-empty-icon" style="color:var(--bear)">✕</div>' +
+        '<div class="bt-empty-title" style="color:var(--bear)">Error</div>' +
+        '<div class="bt-empty-sub">' + String(message || 'Unknown error') + '</div>';
     }
   };
 
@@ -1555,6 +1600,10 @@
     try {
       var normalized = normalizeResultPayload(raw, configOverride);
       if (!normalized) throw new Error('No result payload');
+
+      // ✅ once we are rendering results, lock state so progress updates can't override UI
+      __btHasRenderedResult = true;
+
       hideProgress();
       var empty = document.getElementById('bt_empty');
       var dash = document.getElementById('bt_dashboard');

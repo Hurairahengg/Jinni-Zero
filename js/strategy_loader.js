@@ -2,6 +2,9 @@
    JINNI ZERO — Strategy Loader (Slim / Clean)
    Strategy is king. No engine params.
    Mode switching + strategy run flow + timing.
+
+   Phase 2: Now forwards spread config, ambiguous_bar_mode,
+   and mc_runs to backend for Legacy-exact execution.
 ============================================================ */
 (function () {
   var API = {
@@ -190,7 +193,8 @@
   }
 
   // ==========================================================
-  // BUILD PAYLOAD
+  // BUILD PAYLOAD  (Phase 2: now includes spread, ambiguous,
+  //                 mc_runs for legacy-exact execution)
   // ==========================================================
   function buildPayload() {
     var sliceMode = ($('bt_sliceMode') || {}).value || 'bar_count';
@@ -202,10 +206,20 @@
       bar_range: parseInt(($('bt_barRange') || {}).value || '1000', 10),
       starting_capital: parseFloat(($('bt_startingCapital') || {}).value || '10000'),
       lot_size: parseFloat(($('bt_lotSize') || {}).value || '1.0'),
+      point_value: parseFloat((document.getElementById('bt_pointValue') || {}).value || '1') || 1.0,
       commission: {
         type: (document.querySelector('input[name="comm_type"]:checked') || {}).value || 'flat',
         amount: parseFloat(($('bt_commission') || {}).value || '0'),
       },
+      // ═══ Phase 2: forward missing config for legacy-exact execution ═══
+      ambiguous_bar_mode: ($('bt_ambiguousMode') || {}).value || 'conservative',
+      spread: {
+        enabled: ($('bt_spreadEnabled') || {}).checked || false,
+        min: parseFloat(($('bt_spreadMin') || {}).value || '0'),
+        max: parseFloat(($('bt_spreadMax') || {}).value || '0'),
+        seed: parseInt(($('bt_spreadSeed') || {}).value || '0', 10),
+      },
+      mc_runs: parseInt(($('bt_mcRuns') || {}).value || '1000', 10),
     };
 
     if (sliceMode === 'date_range') {
@@ -249,6 +263,19 @@
       stageProgress('step_load', 10, 'Preparing strategy…');
       stageProgress('step_run', 35, 'Running strategy engine…');
 
+      // ✅ TEMP FIX: show fake live stats reset
+      if (typeof window.btShowRunnerState === 'function') {
+        window.btShowRunnerState({
+          pct: 35,
+          live: {
+            equity: 0,
+            drawdown: 0,
+            open_trade: null,
+            last_closed_pnl: null,
+          },
+        });
+      }
+
       var fetchT0 = performance.now();
       var resp = await fetch(API.run, {
         method: 'POST',
@@ -260,6 +287,36 @@
 
       var parseT0 = performance.now();
       var data = await resp.json().catch(function () { return {}; });
+      // ✅ SAFETY: unwrap if backend accidentally returns {type:"result", data:{...}}
+      if (data && data.type === 'result' && data.data) {
+        data = data.data;
+      }
+
+      // ✅ SAFETY: normalize stats key if backend uses "metrics"
+      if (data && !data.stats && data.metrics) {
+        data.stats = data.metrics;
+      }
+
+      // ✅ SAFETY: normalize curves if backend uses nested "curves"
+      if (data && !data.equity_curve && data.curves) {
+        data.equity_curve =
+          data.curves.equity_downsampled || data.curves.equity_full || [];
+      }
+      if (data && !data.drawdown_curve && data.curves) {
+        data.drawdown_curve =
+          data.curves.drawdown_downsampled || data.curves.drawdown_full || [];
+      }
+
+      // ✅ HARD FAIL if renderer is missing (prevents silent "stuck" UI)
+      if (typeof window.btRenderAnyResult !== 'function') {
+        console.error('btRenderAnyResult is missing. backtest.js did not expose it.');
+        if (typeof window.btShowRunnerError === 'function') {
+          window.btShowRunnerError('btRenderAnyResult missing (backtest.js not loaded or crashed).');
+        } else {
+          alert('btRenderAnyResult missing (backtest.js not loaded or crashed).');
+        }
+        return;
+      }
       var parseT1 = performance.now();
       timing.parse_ms = Math.round(parseT1 - parseT0);
 
