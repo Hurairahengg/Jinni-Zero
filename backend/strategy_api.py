@@ -8,7 +8,7 @@ import os
 import time as _time
 from datetime import datetime, timezone
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from backend.engine_core import BacktestEngine
 from backend.shared import clean_for_json
@@ -66,6 +66,30 @@ def load_bars(range_pt, bar_range, start_date=None, end_date=None):
     return normalized
 
 
+def _setup_engine(payload):
+    """Shared setup for both streaming and non-streaming endpoints."""
+    strategy_id = payload.get("strategy_id")
+    if not strategy_id:
+        raise ValueError("Missing strategy_id")
+
+    strategy = get_strategy(strategy_id)
+
+    bars = load_bars(
+        range_pt=int(payload.get("range", 10)),
+        bar_range=int(payload.get("bar_range", 1000)),
+        start_date=payload.get("start_date"),
+        end_date=payload.get("end_date"),
+    )
+
+    lookback_override = int(payload.get("lookback_override", 0) or 0)
+    validate_lookback(strategy, len(bars), lookback_override)
+
+    if len(bars) < 5:
+        raise ValueError("Insufficient data")
+
+    return BacktestEngine(bars=bars, strategy=strategy, payload=payload)
+
+
 @strategy_api.get("/strategies")
 def strategies_list():
     return jsonify(list_strategy_metadata()), 200
@@ -82,36 +106,12 @@ def strategy_detail(strategy_id):
 
 @strategy_api.post("/backtest/run")
 def strategy_backtest_run():
+    """Non-streaming: single JSON response."""
     try:
         route_t0 = _time.perf_counter()
         payload = request.get_json(force=True) or {}
 
-        strategy_id = payload.get("strategy_id")
-        if not strategy_id:
-            return jsonify({"error": "Missing strategy_id"}), 400
-
-        strategy = get_strategy(strategy_id)
-
-        bars = load_bars(
-            range_pt=int(payload.get("range", 10)),
-            bar_range=int(payload.get("bar_range", 1000)),
-            start_date=payload.get("start_date"),
-            end_date=payload.get("end_date"),
-        )
-
-        # Validate lookback
-        lookback_override = int(payload.get("lookback_override", 0) or 0)
-        validate_lookback(strategy, len(bars), lookback_override)
-
-        if len(bars) < 5:
-            return jsonify({"error": "Insufficient data"}), 400
-
-        engine = BacktestEngine(
-            bars=bars,
-            strategy=strategy,
-            payload=payload,
-        )
-
+        engine = _setup_engine(payload)
         result = engine.run()
 
         json_t0 = _time.perf_counter()
@@ -135,3 +135,38 @@ def strategy_backtest_run():
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@strategy_api.post("/backtest/run/stream")
+def strategy_backtest_run_stream():
+    """Streaming: NDJSON progress + result. Matches legacy /api/backtest/stream."""
+    try:
+        payload = request.get_json(force=True) or {}
+        engine = _setup_engine(payload)
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+    def generate():
+        try:
+            for msg in engine.run_streaming():
+                yield json.dumps(clean_for_json(msg)) + "\n"
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='application/x-ndjson',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Access-Control-Allow-Origin': '*',
+        },
+    )

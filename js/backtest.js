@@ -7,6 +7,10 @@
       Fallback analytics kept ONLY for chart data (rolling, scatter, etc.)
       when backend analytics are incomplete.
       Throttled rendering, lower point caps, reduced DOM churn.
+
+ v4 — Currency conversion via CurrencyDisplay.format() at render time.
+      Trade cap handling (total_trade_count, trades_truncated).
+      All dollar values tagged with data-raw-usd for live refresh.
  ═══════════════════════════════════════════════════════════════════ */
 (function () {
   var API = 'http://localhost:5000/api/backtest';
@@ -301,6 +305,33 @@
       if (wrap) wrap.style.display = this.checked ? '' : 'none';
     });
   }
+  // ── Sizing mode toggle ────────────────────────────────────────────
+  var sizingModeEl = document.getElementById('bt_sizingMode');
+  if (sizingModeEl) {
+    sizingModeEl.addEventListener('change', function () {
+      var mode = this.value;
+      var fixedWrap = document.getElementById('bt_fixedLotWrap');
+      var riskWrap = document.getElementById('bt_riskPctWrap');
+      if (fixedWrap) fixedWrap.style.display = mode === 'fixed' ? '' : 'none';
+      if (riskWrap) riskWrap.style.display = mode === 'risk_pct' ? '' : 'none';
+      updateRiskHint();
+    });
+  }
+
+  function updateRiskHint() {
+    var hint = document.getElementById('bt_riskHint');
+    if (!hint) return;
+    var cap = parseFloat((document.getElementById('bt_startingCapital') || {}).value || '10000') || 10000;
+    var pct = parseFloat((document.getElementById('bt_riskPct') || {}).value || '1') || 1;
+    var riskAmt = cap * (pct / 100);
+    hint.textContent = '$' + cap.toLocaleString() + ' balance × ' + pct + '% = $' + riskAmt.toFixed(2) + ' risk per trade';
+  }
+
+  var riskPctEl = document.getElementById('bt_riskPct');
+  if (riskPctEl) riskPctEl.addEventListener('input', updateRiskHint);
+  var startCapEl = document.getElementById('bt_startingCapital');
+  if (startCapEl) startCapEl.addEventListener('input', function () { updateRiskHint(); updateLotHint(); });
+  updateRiskHint();
 
   // ── Slice mode toggle ─────────────────────────────────────────────
   var sliceModeEl = document.getElementById('bt_sliceMode');
@@ -326,19 +357,19 @@
 
   // ── Lot size hint ─────────────────────────────────────────────────
   function updateLotHint() {
-      var ls = parseFloat((document.getElementById('bt_lotSize') || {}).value || '1') || 1;
-      var pv = parseFloat((document.getElementById('bt_pointValue') || {}).value || '1') || 1;
-      var dollarsPerPt = ls * pv;
-      var hint = document.getElementById('bt_lotHint');
-      if (hint) hint.textContent = '1 pt = $' + dollarsPerPt.toFixed(dollarsPerPt < 0.1 ? 3 : 2);
-      var pvHint = document.getElementById('bt_pvHint');
-      if (pvHint) pvHint.textContent = '1 pt × ' + ls + ' lot = $' + dollarsPerPt.toFixed(2);
-    }
-    var lotSizeEl = document.getElementById('bt_lotSize');
-    if (lotSizeEl) lotSizeEl.addEventListener('input', updateLotHint);
-    var pvEl = document.getElementById('bt_pointValue');
-    if (pvEl) pvEl.addEventListener('input', updateLotHint);
-    updateLotHint();
+    var ls = parseFloat((document.getElementById('bt_lotSize') || {}).value || '1') || 1;
+    var pv = parseFloat((document.getElementById('bt_pointValue') || {}).value || '1') || 1;
+    var dollarsPerPt = ls * pv;
+    var hint = document.getElementById('bt_lotHint');
+    if (hint) hint.textContent = '1 pt = $' + dollarsPerPt.toFixed(dollarsPerPt < 0.1 ? 3 : 2);
+    var pvHint = document.getElementById('bt_pvHint');
+    if (pvHint) pvHint.textContent = '1 pt × ' + ls + ' lot = $' + dollarsPerPt.toFixed(2);
+  }
+  var lotSizeEl = document.getElementById('bt_lotSize');
+  if (lotSizeEl) lotSizeEl.addEventListener('input', updateLotHint);
+  var pvEl = document.getElementById('bt_pointValue');
+  if (pvEl) pvEl.addEventListener('input', updateLotHint);
+  updateLotHint();
 
   // ════════════════════════════════════════════════════════════════════
   // CONFIG COLLECTION (legacy/manual mode)
@@ -363,6 +394,8 @@
       starting_capital: parseFloat((document.getElementById('bt_startingCapital') || {}).value || '10000') || 10000,
       lot_size: parseFloat((document.getElementById('bt_lotSize') || {}).value || '1.0') || 1.0,
       point_value: parseFloat((document.getElementById('bt_pointValue') || {}).value || '1') || 1.0,
+      sizing_mode: (document.getElementById('bt_sizingMode') || {}).value || 'fixed',
+      risk_pct: parseFloat((document.getElementById('bt_riskPct') || {}).value || '1.0') || 1.0,
       mas: mas,
       entry: (document.getElementById('bt_entry') || {}).value || 'above_all_mas',
       require_candle_confirm: !!((document.getElementById('bt_candleConfirm') || {}).checked),
@@ -933,11 +966,16 @@
   }
 
   // ════════════════════════════════════════════════════════════════════
-  // KPI HELPERS
+  // KPI HELPERS (v4: currency-aware)
   // ════════════════════════════════════════════════════════════════════
-  function kpiCard(label, value, colorClass, subtext) {
+  function kpiCard(label, value, colorClass, subtext, rawUsd) {
     colorClass = colorClass || ''; subtext = subtext || '';
-    return '<div class="bt-kpi"><div class="bt-kpi-label">' + label + '</div><div class="bt-kpi-value ' + colorClass + '">' + value + '</div>' +
+    // If rawUsd is provided, tag the value element so CurrencyDisplay.refreshAll() works
+    var dataAttr = '';
+    if (rawUsd != null && isFinite(Number(rawUsd))) {
+      dataAttr = ' data-raw-usd="' + Number(rawUsd) + '"';
+    }
+    return '<div class="bt-kpi"><div class="bt-kpi-label">' + label + '</div><div class="bt-kpi-value ' + colorClass + '"' + dataAttr + '>' + value + '</div>' +
       (subtext ? '<div class="bt-kpi-sub">' + subtext + '</div>' : '') + '</div>';
   }
 
@@ -946,10 +984,16 @@
     return Number(v) > 0 ? 'bull' : 'bear';
   }
 
-  function fmt(v, prefix, dec) {
+  function fmt(v, prefix, dec, opts) {
+    if (v == null || !isFinite(Number(v))) return '—';
+    // If CurrencyDisplay is loaded and prefix is $ (dollar value), use it
+    if (window.CurrencyDisplay && (prefix == null || prefix === '$')) {
+      var fmtOpts = { decimals: dec != null ? dec : 2 };
+      if (opts) { for (var k in opts) fmtOpts[k] = opts[k]; }
+      return window.CurrencyDisplay.format(Number(v), fmtOpts);
+    }
     prefix = prefix == null ? '$' : prefix;
     dec = dec != null ? dec : 2;
-    if (v == null || !isFinite(Number(v))) return '—';
     return prefix + Number(v).toFixed(dec);
   }
 
@@ -1099,12 +1143,28 @@
   }
 
   // ════════════════════════════════════════════════════════════════════
-  // TRADE LOG
+  // TRADE LOG (v4: currency-aware + trade cap handling)
   // ════════════════════════════════════════════════════════════════════
   function buildTradeLog(trades) {
     var el = document.getElementById('bt_tradeLog');
     if (!el) return;
     if (!trades || !trades.length) { el.innerHTML = '<div class="bt-trade-log-empty">No trades</div>'; return; }
+
+    var CD = window.CurrencyDisplay;
+    function fmtDollar(v) {
+      if (v == null || !isFinite(Number(v))) return '—';
+      if (CD) return CD.format(Number(v));
+      return '$' + Number(v).toFixed(2);
+    }
+    function fmtDollarSigned(v) {
+      if (v == null || !isFinite(Number(v))) return '—';
+      if (CD) return CD.format(Number(v), { forceSign: true });
+      return (Number(v) >= 0 ? '+' : '') + '$' + Number(v).toFixed(2);
+    }
+    function rawAttr(v) {
+      if (v == null || !isFinite(Number(v))) return '';
+      return ' data-raw-usd="' + Number(v) + '"';
+    }
 
     var cols = ['#', 'POS', 'DIR', 'ENTRY', 'EXIT', 'REASON', 'SL LVL', 'TP LVL', 'R', 'SIZE', 'GROSS', 'COMM', 'NET', 'BARS'];
     var gridCols = '30px 44px 42px 66px 66px 84px 58px 58px 50px 52px 60px 48px 60px 36px';
@@ -1138,25 +1198,45 @@
         '<div class="bt-trade-cell">' + tpLvl + '</div>' +
         '<div class="bt-trade-cell ' + netCls + '">' + r + '</div>' +
         '<div class="bt-trade-cell">' + size + '</div>' +
-        '<div class="bt-trade-cell ' + grossCls + '">' + (t.gross_pnl != null ? ((toNumber(t.gross_pnl, 0) >= 0 ? '+' : '') + toNumber(t.gross_pnl, 0).toFixed(2)) : '—') + '</div>' +
-        '<div class="bt-trade-cell">' + (t.commission != null ? toNumber(t.commission, 0).toFixed(2) : '—') + '</div>' +
-        '<div class="bt-trade-cell ' + netCls + '">' + (t.net_pnl != null ? ((toNumber(t.net_pnl, 0) >= 0 ? '+' : '') + toNumber(t.net_pnl, 0).toFixed(2)) : '—') + '</div>' +
+        '<div class="bt-trade-cell ' + grossCls + '"' + rawAttr(t.gross_pnl) + '>' + fmtDollarSigned(t.gross_pnl) + '</div>' +
+        '<div class="bt-trade-cell"' + rawAttr(t.commission) + '>' + fmtDollar(t.commission) + '</div>' +
+        '<div class="bt-trade-cell ' + netCls + '"' + rawAttr(t.net_pnl) + '>' + fmtDollarSigned(t.net_pnl) + '</div>' +
         '<div class="bt-trade-cell">' + (t.bars_held != null ? t.bars_held : '—') + '</div>' +
         '</div>';
     }).join('');
 
-    var truncNote = trades.length > 500 ? '<div style="text-align:center;padding:6px;color:var(--text-dim);font-size:0.6rem;">Showing last 500 of ' + trades.length + ' trades</div>' : '';
+    // ── Truncation note ─────────────────────────────────────────
+    var totalCount = 0;
+    if (_lastRenderData && _lastRenderData.data && _lastRenderData.data.total_trade_count) {
+      totalCount = _lastRenderData.data.total_trade_count;
+    } else {
+      totalCount = trades.length;
+    }
+
+    var truncNote = '';
+    if (totalCount > trades.length) {
+      // Backend truncated trades (100k+ scenario)
+      truncNote = '<div style="text-align:center;padding:8px;color:var(--accent);font-size:0.6rem;border-top:1px solid var(--border);">'
+        + 'Showing last ' + trades.length.toLocaleString() + ' of ' + totalCount.toLocaleString() + ' total trades'
+        + ' (stats computed from ALL trades)</div>';
+    } else if (trades.length > 500) {
+      // DOM cap (display only last 500)
+      truncNote = '<div style="text-align:center;padding:6px;color:var(--text-dim);font-size:0.6rem;">'
+        + 'Showing last 500 of ' + trades.length.toLocaleString() + ' trades</div>';
+    }
     el.innerHTML = header + rows + truncNote;
   }
 
   // ════════════════════════════════════════════════════════════════════
-  // NORMALIZATION
+  // NORMALIZATION (v4: trade cap fields)
   // ════════════════════════════════════════════════════════════════════
   function normalizeResultPayload(raw, configOverride) {
     if (!raw) return null;
 
     var data = {
       trades: Array.isArray(raw.trades) ? raw.trades : [],
+      total_trade_count: raw.total_trade_count || (Array.isArray(raw.trades) ? raw.trades.length : 0),
+      trades_truncated: !!raw.trades_truncated,
       stats: raw.stats || raw.metrics || {},
       analytics: raw.analytics || null,
       equity_curve: raw.equity_curve || (raw.curves ? (raw.curves.equity_downsampled || raw.curves.equity_full || []) : []) || [],
@@ -1190,7 +1270,7 @@
   }
 
   // ════════════════════════════════════════════════════════════════════
-  // POPULATE DASHBOARD  (stats from Python — display only)
+  // POPULATE DASHBOARD (v4: currency-aware, rawUsd tagged)
   // ════════════════════════════════════════════════════════════════════
   function populateDashboard(data, config) {
     resetAllVPs();
@@ -1216,38 +1296,45 @@
     if (config && config.engine && config.engine.scaling_in && config.engine.scaling_in.enabled)
       extraMeta += ' · scaling-in enabled';
 
+    var sizingLabel = '';
+    if (config && config.sizing_mode === 'risk_pct') {
+      sizingLabel = 'risk ' + (config.risk_pct || 1) + '%/trade';
+    } else {
+      sizingLabel = 'lot ' + (s.lot_size != null ? s.lot_size : 1);
+    }
+
     document.getElementById('bd_meta').textContent =
-      (s.total_bars_used || 0) + ' bars · lot ' + (s.lot_size != null ? s.lot_size : 1) +
-      ' · cap $' + (s.starting_capital != null ? s.starting_capital : 10000) +
+      (s.total_bars_used || 0) + ' bars · ' + sizingLabel +
+      ' · cap ' + fmt(s.starting_capital, '$', 0) +
       ' · ' + (s.date_range || '') + extraMeta;
 
     // ── CORE STATISTICS ────────────────────────────────────────
     fillKpiGrid('bd_coreKpis', [
-      kpiCard('STARTING CAPITAL', fmt(s.starting_capital, '$', 0)),
-      kpiCard('FINAL BALANCE', fmt(s.final_balance), colorClass(toNumber(s.final_balance, 0) - toNumber(s.starting_capital, 0))),
-      kpiCard('LOT SIZE', (s.lot_size != null ? s.lot_size : 1) + ' (1pt=$' + (s.lot_size != null ? s.lot_size : 1) + ')'),
-      kpiCard('NET P&L', fmt(s.net_pnl), colorClass(s.net_pnl)),
+      kpiCard('STARTING CAPITAL', fmt(s.starting_capital, '$', 0), '', '', s.starting_capital),
+      kpiCard('FINAL BALANCE', fmt(s.final_balance), colorClass(toNumber(s.final_balance, 0) - toNumber(s.starting_capital, 0)), '', s.final_balance),
+      kpiCard('LOT SIZE', (s.lot_size != null ? s.lot_size : 1) + ' (1pt=' + fmt(s.lot_size != null ? s.lot_size : 1, '$', 2) + ')'),
+      kpiCard('NET P&L', fmt(s.net_pnl), colorClass(s.net_pnl), '', s.net_pnl),
       kpiCard('NET PROFIT %', fmtPct(s.net_profit_pct), colorClass(s.net_profit_pct)),
       kpiCard('PROFIT FACTOR', fmtRatio(s.profit_factor), s.profit_factor > 1.5 ? 'bull' : s.profit_factor < 1 ? 'bear' : ''),
       kpiCard('WIN RATE', fmtPct(toNumber(s.win_rate, 0) * 100), toNumber(s.win_rate, 0) > 0.5 ? 'bull' : 'bear'),
       kpiCard('TOTAL TRADES', s.total_trades || 0),
       kpiCard('WINS / LOSSES', (s.winning_trades || 0) + ' / ' + (s.losing_trades || 0)),
-      kpiCard('AVG WIN', fmt(s.avg_win), 'bull'),
-      kpiCard('AVG LOSS', fmt(s.avg_loss), 'bear'),
-      kpiCard('LARGEST WIN', fmt(s.largest_win), 'bull'),
-      kpiCard('LARGEST LOSS', fmt(s.largest_loss), 'bear'),
-      kpiCard('EXPECTANCY $', fmt(s.expectancy), colorClass(s.expectancy)),
+      kpiCard('AVG WIN', fmt(s.avg_win), 'bull', '', s.avg_win),
+      kpiCard('AVG LOSS', fmt(s.avg_loss), 'bear', '', s.avg_loss),
+      kpiCard('LARGEST WIN', fmt(s.largest_win), 'bull', '', s.largest_win),
+      kpiCard('LARGEST LOSS', fmt(s.largest_loss), 'bear', '', s.largest_loss),
+      kpiCard('EXPECTANCY', fmt(s.expectancy), colorClass(s.expectancy), '', s.expectancy),
       kpiCard('MAX CONSEC WINS', s.max_consec_wins || 0),
       kpiCard('MAX CONSEC LOSS', s.max_consec_losses || 0),
     ]);
 
     // ── RISK METRICS ───────────────────────────────────────────
     fillKpiGrid('bd_riskKpis', [
-      kpiCard('MAX DRAWDOWN $', fmt(s.max_drawdown), 'bear'),
+      kpiCard('MAX DRAWDOWN', fmt(s.max_drawdown), 'bear', '', s.max_drawdown),
       kpiCard('MAX DRAWDOWN %', fmtPct(s.max_drawdown_pct), 'bear'),
-      kpiCard('FINAL EQUITY', fmt(s.final_equity), colorClass(toNumber(s.final_equity, 0) - toNumber(s.starting_capital, 0))),
+      kpiCard('FINAL EQUITY', fmt(s.final_equity), colorClass(toNumber(s.final_equity, 0) - toNumber(s.starting_capital, 0)), '', s.final_equity),
       kpiCard('TOTAL BARS', s.total_bars_used || 0),
-      kpiCard('AVG DRAWDOWN', fmt(s.avg_drawdown), 'bear'),
+      kpiCard('AVG DRAWDOWN', fmt(s.avg_drawdown), 'bear', '', s.avg_drawdown),
       kpiCard('DD DURATION', (s.drawdown_duration_bars || 0) + ' bars'),
       kpiCard('RECOVERY FACTOR', fmtRatio(s.recovery_factor), colorClass(s.recovery_factor)),
       kpiCard('CALMAR', fmtRatio(s.calmar_ratio), colorClass(s.calmar_ratio)),
@@ -1265,12 +1352,12 @@
 
     // ── TRADE ANALYSIS ─────────────────────────────────────────
     fillKpiGrid('bd_tradeKpis', [
-      kpiCard('PROFIT/TRADE', fmt(s.profit_per_trade), colorClass(s.profit_per_trade)),
+      kpiCard('PROFIT/TRADE', fmt(s.profit_per_trade), colorClass(s.profit_per_trade), '', s.profit_per_trade),
       kpiCard('PAYOFF RATIO', fmtRatio(s.payoff_ratio), s.payoff_ratio > 1 ? 'bull' : 'bear'),
       kpiCard('AVG WIN R', s.avg_win_r != null ? fmtRatio(s.avg_win_r) + 'R' : '—', 'bull'),
       kpiCard('AVG LOSS R', s.avg_loss_r != null ? fmtRatio(s.avg_loss_r) + 'R' : '—', 'bear'),
-      kpiCard('MEDIAN WIN', fmt(s.median_win), 'bull'),
-      kpiCard('MEDIAN LOSS', fmt(s.median_loss), 'bear'),
+      kpiCard('MEDIAN WIN', fmt(s.median_win), 'bull', '', s.median_win),
+      kpiCard('MEDIAN LOSS', fmt(s.median_loss), 'bear', '', s.median_loss),
     ]);
 
     // ── TIME & EXPOSURE ────────────────────────────────────────
@@ -1287,31 +1374,31 @@
 
     // ── PERIOD PERFORMANCE ─────────────────────────────────────
     fillKpiGrid('bd_periodKpis', [
-      kpiCard('AVG DAILY P&L', fmt(s.avg_daily_pnl), colorClass(s.avg_daily_pnl)),
-      kpiCard('AVG WEEKLY P&L', fmt(s.avg_weekly_pnl), colorClass(s.avg_weekly_pnl)),
-      kpiCard('AVG MONTHLY P&L', fmt(s.avg_monthly_pnl), colorClass(s.avg_monthly_pnl)),
-      kpiCard('BEST DAY', fmt(s.best_day), 'bull'),
-      kpiCard('WORST DAY', fmt(s.worst_day), 'bear'),
-      kpiCard('BEST WEEK', fmt(s.best_week), 'bull'),
-      kpiCard('WORST WEEK', fmt(s.worst_week), 'bear'),
-      kpiCard('BEST MONTH', fmt(s.best_month), 'bull'),
-      kpiCard('WORST MONTH', fmt(s.worst_month), 'bear'),
+      kpiCard('AVG DAILY P&L', fmt(s.avg_daily_pnl), colorClass(s.avg_daily_pnl), '', s.avg_daily_pnl),
+      kpiCard('AVG WEEKLY P&L', fmt(s.avg_weekly_pnl), colorClass(s.avg_weekly_pnl), '', s.avg_weekly_pnl),
+      kpiCard('AVG MONTHLY P&L', fmt(s.avg_monthly_pnl), colorClass(s.avg_monthly_pnl), '', s.avg_monthly_pnl),
+      kpiCard('BEST DAY', fmt(s.best_day), 'bull', '', s.best_day),
+      kpiCard('WORST DAY', fmt(s.worst_day), 'bear', '', s.worst_day),
+      kpiCard('BEST WEEK', fmt(s.best_week), 'bull', '', s.best_week),
+      kpiCard('WORST WEEK', fmt(s.worst_week), 'bear', '', s.worst_week),
+      kpiCard('BEST MONTH', fmt(s.best_month), 'bull', '', s.best_month),
+      kpiCard('WORST MONTH', fmt(s.worst_month), 'bear', '', s.worst_month),
     ]);
 
     // ── MAE / MFE ──────────────────────────────────────────────
     fillKpiGrid('bd_maeMfeKpis', [
-      kpiCard('AVG MAE $', fmt(s.avg_mae_dollar), 'bear'),
-      kpiCard('AVG MFE $', fmt(s.avg_mfe_dollar), 'bull'),
+      kpiCard('AVG MAE', fmt(s.avg_mae_dollar), 'bear', '', s.avg_mae_dollar),
+      kpiCard('AVG MFE', fmt(s.avg_mfe_dollar), 'bull', '', s.avg_mfe_dollar),
       kpiCard('EDGE RATIO', fmtRatio(s.edge_ratio), s.edge_ratio > 1 ? 'bull' : 'bear'),
     ]);
 
     // ── COMMISSION ─────────────────────────────────────────────
     var comm = a.commission || {};
     fillKpiGrid('bd_commKpis', [
-      kpiCard('TOTAL COMMISSION', fmt(comm.total), 'bear'),
-      kpiCard('COMMISSION/TRADE', fmt(comm.per_trade)),
-      kpiCard('GROSS P&L', fmt(comm.net_without_comm)),
-      kpiCard('NET P&L (after comm)', fmt(comm.net_with_comm), colorClass(comm.net_with_comm)),
+      kpiCard('TOTAL COMMISSION', fmt(comm.total), 'bear', '', comm.total),
+      kpiCard('COMMISSION/TRADE', fmt(comm.per_trade), '', '', comm.per_trade),
+      kpiCard('GROSS P&L', fmt(comm.net_without_comm), '', '', comm.net_without_comm),
+      kpiCard('NET P&L (after comm)', fmt(comm.net_with_comm), colorClass(comm.net_with_comm), '', comm.net_with_comm),
       kpiCard('COMM % OF GROSS', fmtPct(comm.pct_of_gross), 'bear'),
     ]);
 
@@ -1320,11 +1407,11 @@
     var regCards = [];
     Object.entries(reg.volatility || {}).forEach(function (entry) {
       var k = entry[0], v = entry[1];
-      regCards.push(kpiCard('VOL: ' + String(k).toUpperCase().replace('_', ' '), fmt(v.net) + ' (' + v.trades + 't)', colorClass(v.net), 'WR ' + v.wr + '%'));
+      regCards.push(kpiCard('VOL: ' + String(k).toUpperCase().replace('_', ' '), fmt(v.net) + ' (' + v.trades + 't)', colorClass(v.net), 'WR ' + v.wr + '%', v.net));
     });
     Object.entries(reg.choppiness || {}).forEach(function (entry) {
       var k = entry[0], v = entry[1];
-      regCards.push(kpiCard('REGIME: ' + String(k).toUpperCase(), fmt(v.net) + ' (' + v.trades + 't)', colorClass(v.net), 'WR ' + v.wr + '%'));
+      regCards.push(kpiCard('REGIME: ' + String(k).toUpperCase(), fmt(v.net) + ' (' + v.trades + 't)', colorClass(v.net), 'WR ' + v.wr + '%', v.net));
     });
     if (!regCards.length) regCards.push(kpiCard('REGIME', 'No regime breakdown'));
     fillKpiGrid('bd_regimeKpis', regCards);
@@ -1333,12 +1420,12 @@
     var mc = a.monte_carlo || {};
     var fe = mc.final_equity || {}, dd = mc.max_drawdown || {};
     fillKpiGrid('bd_mcKpis', [
-      kpiCard('FINAL EQ P5', fmt(fe.p5), colorClass(fe.p5)),
-      kpiCard('FINAL EQ P25', fmt(fe.p25), colorClass(fe.p25)),
-      kpiCard('FINAL EQ P50', fmt(fe.p50), colorClass(fe.p50)),
-      kpiCard('FINAL EQ P95', fmt(fe.p95), colorClass(fe.p95)),
-      kpiCard('DD P50', fmt(dd.p50), 'bear'),
-      kpiCard('DD P95 (WORST)', fmt(dd.p95), 'bear'),
+      kpiCard('FINAL EQ P5', fmt(fe.p5), colorClass(fe.p5), '', fe.p5),
+      kpiCard('FINAL EQ P25', fmt(fe.p25), colorClass(fe.p25), '', fe.p25),
+      kpiCard('FINAL EQ P50', fmt(fe.p50), colorClass(fe.p50), '', fe.p50),
+      kpiCard('FINAL EQ P95', fmt(fe.p95), colorClass(fe.p95), '', fe.p95),
+      kpiCard('DD P50', fmt(dd.p50), 'bear', '', dd.p50),
+      kpiCard('DD P95 (WORST)', fmt(dd.p95), 'bear', '', dd.p95),
     ]);
 
     var probEl = document.getElementById('bd_mcProb');

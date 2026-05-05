@@ -420,3 +420,36 @@ def clean_for_json(obj):
     if isinstance(obj, dict):
         return {k: clean_for_json(v) for k, v in obj.items()}
     return obj
+# ════════════════════════════════════════════════════════════════════
+#  ANALYTICS ARRAY CAPPING (prevents massive payloads)
+# ════════════════════════════════════════════════════════════════════
+
+def cap_analytics_arrays(analytics, max_points=1500):
+    """Downsample analytics arrays to prevent huge JSON payloads.
+    Called by both legacy and strategy engines before sending response."""
+    if not analytics:
+        return analytics
+
+    # Rolling arrays (one entry per trade — can be 100k+)
+    roll = analytics.get("rolling")
+    if roll:
+        for key in ("win_rate", "expectancy", "profit_factor", "sharpe"):
+            arr = roll.get(key, [])
+            if len(arr) > max_points:
+                # Simple stride downsample (these are sequential, not min-max)
+                step = max(1, len(arr) // max_points)
+                roll[key] = arr[::step][:max_points]
+
+    # MAE/MFE scatter (one per trade)
+    mm = analytics.get("mae_mfe", [])
+    if len(mm) > max_points:
+        step = max(1, len(mm) // max_points)
+        analytics["mae_mfe"] = mm[::step][:max_points]
+
+    # Return scatter (one per trade)
+    rs = analytics.get("return_scatter", [])
+    if len(rs) > max_points:
+        step = max(1, len(rs) // max_points)
+        analytics["return_scatter"] = rs[::step][:max_points]
+
+    return analytics

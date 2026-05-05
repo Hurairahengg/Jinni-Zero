@@ -167,12 +167,30 @@
             <label class="bt-label">Starting Capital ($)</label>
             <input class="bt-input" type="number" id="bt_startingCapital" value="10000" min="0" step="500"/>
           </div>
-
+          
           <div class="bt-field">
-            <label class="bt-label">Lot Size</label>
-            <div class="bt-lotsize-row">
+            <label class="bt-label">Position Sizing</label>
+            <select class="bt-select" id="bt_sizingMode">
+              <option value="fixed" selected>Fixed Lot</option>
+              <option value="risk_pct">Risk %</option>
+            </select>
+          </div>
+
+          <div id="bt_fixedLotWrap">
+            <div class="bt-field">
+              <label class="bt-label">Lot Size</label>
               <input class="bt-input" type="number" id="bt_lotSize" value="1.0" min="0.01" step="0.01"/>
-              <span class="bt-lotsize-hint" id="bt_lotHint">1 pt = $1.00</span>
+              <div class="bt-toggle-label" id="bt_lotHint">1 pt = $1.00</div>
+            </div>
+          </div>
+
+          <div id="bt_riskPctWrap" style="display:none;">
+            <div class="bt-field">
+              <label class="bt-label">Risk Per Trade (%)</label>
+              <input class="bt-input" type="number" id="bt_riskPct" value="1.0" min="0.01" max="100" step="0.1"/>
+              <div class="bt-toggle-label" id="bt_riskHint">
+                $1,000 balance × 1% = $10 risk per trade
+              </div>
             </div>
           </div>
         </div>
@@ -344,6 +362,44 @@
               <span class="bt-toggle-label">Apply random spread per trade (realistic slippage)</span>
             </div>
           </div>
+          <!-- ═══ CURRENCY DISPLAY (display-only) ═══ -->
+        <div class="bt-section" id="cc_section_manual">
+          <div class="bt-section-title">CURRENCY DISPLAY</div>
+
+          <div class="bt-field" style="flex-direction:row;align-items:center;gap:8px;">
+            <input type="checkbox" id="cc_enabled"
+                   style="accent-color:var(--accent,#00e5ff);"/>
+            <label class="bt-label" for="cc_enabled"
+                   style="margin:0;cursor:pointer;">
+              Enable Currency Conversion
+            </label>
+          </div>
+
+          <div id="cc_panel" style="display:none;flex-direction:column;gap:8px;">
+            <div class="bt-field">
+              <label class="bt-label">Symbol</label>
+              <select id="cc_symbol" class="bt-select">
+                <option value="$" selected>$</option>
+                <option value="¥">¥</option>
+                <option value="€">€</option>
+                <option value="£">£</option>
+                <option value="₹">₹</option>
+                <option value="৳">৳</option>
+              </select>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">Multiplier (1 USD = ?)</label>
+              <input type="number" id="cc_multiplier" class="bt-input"
+                     value="1" min="0.0001" step="0.01" />
+            </div>
+
+            <div class="bt-toggle-label"
+                 style="font-size:0.54rem;color:#586f7f;">
+              Display-only — does NOT affect backtest calculations.
+            </div>
+          </div>
+        </div>
 
           <div id="bt_spreadWrap" style="display:none;">
             <div class="bt-field">
@@ -524,6 +580,7 @@
   </main>
 
   <script src="js/chart.js"></script>
+  <script src="js/currency.js"></script>
   <script src="js/backtest.js"></script>
   <script src="js/strategy_loader.js"></script>
 </body>

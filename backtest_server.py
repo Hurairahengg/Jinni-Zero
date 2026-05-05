@@ -18,6 +18,7 @@ from backend.shared import (
     calc_comm,
     compute_analytics,
     clean_for_json,
+    cap_analytics_arrays,
 )
 
 app = Flask(__name__)
@@ -159,7 +160,7 @@ class MultiIndicatorEngine:
         return [eng.update(close) for eng in self.engines]
 
 # ════════════════════════════════════════════════════════════════════
-#  BACKTEST ENGINE  (LEGACY — UNTOUCHED LOGIC)
+#  BACKTEST ENGINE  (LEGACY — UNTOUCHED LOGIC + risk% sizing)
 # ════════════════════════════════════════════════════════════════════
 class BacktestEngine:
     def __init__(self, bars, config):
@@ -184,6 +185,10 @@ class BacktestEngine:
         self.gating_enabled = bool(self.gating_cfg.get("enabled", False))
 
         self.spread_gen = SpreadGenerator(config.get("spread", {}))
+
+        # ── Position sizing ──────────────────────────────────────
+        self.sizing_mode = str(config.get("sizing_mode", "fixed")).lower()
+        self.risk_pct = float(config.get("risk_pct", 1.0))
 
         self.entry_ind = MultiIndicatorEngine(self.ma_defs)
 
@@ -217,11 +222,14 @@ class BacktestEngine:
         if self.tp_ma_eng:  self.tp_ma_eng.precompute(closes, dataset_id)
         if self.gating_eng: self.gating_eng.precompute(closes, dataset_id)
         dt = _time.perf_counter() - t0
+
+        sizing_str = f"lot={self.lot_size}" if self.sizing_mode == "fixed" \
+                     else f"risk={self.risk_pct}%"
         print(f"  [ENGINE] {self.n} bars | entry={self.entry_mode} | "
               f"SL={self.sl_mode} | TP={self.tp_mode} | "
               f"gating={self.gating_enabled} | "
               f"candle_confirm={self.require_candle_confirm} | "
-              f"lot={self.lot_size} | spread={self.spread_gen.enabled} | "
+              f"{sizing_str} | spread={self.spread_gen.enabled} | "
               f"precompute={dt*1000:.1f}ms")
 
     def run(self):
@@ -232,7 +240,7 @@ class BacktestEngine:
         yield from self._run_generator()
         yield {"type": "result", "data": self._build_result()}
 
-    # ── Core loop (LEGACY — UNTOUCHED) ──────────────────────────
+    # ── Core loop (LEGACY — UNTOUCHED + risk% sizing) ───────────
     def _run_generator(self):
         state = "flat"
         open_t = None
@@ -294,6 +302,18 @@ class BacktestEngine:
                     if direction == "short" and tp_level >= ep:
                         valid_entry = False
 
+                # ── Dynamic position sizing ──────────────────────
+                if valid_entry and self.sizing_mode == "risk_pct":
+                    if risk_pts is None or risk_pts <= 0:
+                        valid_entry = False
+                    else:
+                        balance_now = self.starting_cap + cum
+                        risk_amount = balance_now * (self.risk_pct / 100.0)
+                        trade_lot = risk_amount / (risk_pts * self.point_value)
+                        trade_lot = max(0.01, round(trade_lot, 2))
+                else:
+                    trade_lot = self.lot_size
+
                 if valid_entry:
                     open_t = dict(
                         id=len(self.trades)+1, direction=direction,
@@ -301,6 +321,7 @@ class BacktestEngine:
                         sl_level=sl_level, tp_level=tp_level,
                         risk_pts=risk_pts, mae=0.0, mfe=0.0, bars_held=0,
                         spread=round(trade_spread, 4),
+                        lot_size=trade_lot,
                     )
                     state = direction
                     just_entered = True
@@ -327,6 +348,7 @@ class BacktestEngine:
                               f"entry={t['entry_price']} exit={t['exit_price']} "
                               f"SL={t.get('sl_level')} TP={t.get('tp_level')} "
                               f"risk={t.get('risk_pts')}pts "
+                              f"lot={t.get('lot_size')} "
                               f"spread={t.get('spread',0):.4f} "
                               f"points={t.get('points_pnl')} "
                               f"R={t.get('net_pnl_r')} "
@@ -355,7 +377,8 @@ class BacktestEngine:
             if state != "flat" and open_t:
                 pts = (c - open_t["entry_price"]) if state == "long" \
                       else (open_t["entry_price"] - c)
-                unrealised = points_to_dollars(pts, self.lot_size, self.point_value)
+                t_lot = open_t.get("lot_size", self.lot_size)
+                unrealised = points_to_dollars(pts, t_lot, self.point_value)
             else:
                 unrealised = 0.0
             eq = self.starting_cap + cum + unrealised
@@ -417,10 +440,8 @@ class BacktestEngine:
             elif self.entry_mode == "ma_cross" and len(self.ma_defs) >= 2 and i > 0:
                 pm = ma_hist[i-1]
                 if None not in (mv[0], mv[1], pm[0], pm[1]):
-                    if pm[0] <= pm[1] and mv[0] > mv[1]:
-                        sig = "long"
-                    elif pm[0] >= pm[1] and mv[0] < mv[1]:
-                        sig = "short"
+                    if pm[0] <= pm[1] and mv[0] > mv[1]: sig = "long"
+                    elif pm[0] >= pm[1] and mv[0] < mv[1]: sig = "short"
 
             elif self.entry_mode == "trend_filter" and i > 0:
                 lm = mv[-1]; plm = ma_hist[i-1][-1]; pc = self.bars[i-1]["close"]
@@ -560,14 +581,16 @@ class BacktestEngine:
 
     def _finalize_trade(self, closed):
         commission = calc_comm(self.comm_cfg)
+        trade_lot = closed.get("lot_size", self.lot_size)
         finalize_trade_pnl(
             closed,
-            lot_size=self.lot_size,
+            lot_size=trade_lot,
             point_value=self.point_value,
             commission=commission,
         )
 
     def _build_result(self):
+        MAX_TRADES = 2000
         perf = {}
         build_t0 = _time.perf_counter()
 
@@ -589,9 +612,22 @@ class BacktestEngine:
         analytics_t1 = _time.perf_counter()
         perf["analytics_seconds"] = round(analytics_t1 - analytics_t0, 4)
 
+        # Cap analytics arrays
+        analytics = cap_analytics_arrays(analytics, 1500)
+
+        # Cap trades in response
+        total_count = len(self.trades)
+        if total_count > MAX_TRADES:
+            trades_out = self.trades[-MAX_TRADES:]
+            print(f"  [TRADE CAP] Sending last {MAX_TRADES} of {total_count} trades")
+        else:
+            trades_out = self.trades
+
         result = dict(
             stats=stats,
-            trades=self.trades,
+            trades=trades_out,
+            total_trade_count=total_count,
+            trades_truncated=total_count > MAX_TRADES,
             equity_curve=ds_curve(self.equity_curve, 1500),
             drawdown_curve=ds_curve(self.dd_curve, 1500),
             analytics=analytics,
@@ -599,13 +635,13 @@ class BacktestEngine:
 
         build_t1 = _time.perf_counter()
         perf["response_build_seconds"] = round(build_t1 - build_t0, 4)
-        perf["trade_count"] = len(self.trades)
+        perf["trade_count"] = total_count
         result["performance"] = perf
 
         print(f"  [BUILD TIMING] stats={perf['stats_seconds']:.3f}s "
               f"analytics={perf['analytics_seconds']:.3f}s "
               f"response_build={perf['response_build_seconds']:.3f}s "
-              f"trades={perf['trade_count']}")
+              f"trades={total_count}")
 
         return result
 
@@ -713,8 +749,12 @@ def run_backtest_stream():
     except Exception as e: return jsonify(error=str(e)),500
     engine=BacktestEngine(bars,cfg)
     def generate():
-        for msg in engine.run_streaming():
-            yield json.dumps(clean_for_json(msg))+"\n"
+        try:
+            for msg in engine.run_streaming():
+                yield json.dumps(clean_for_json(msg))+"\n"
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
     return Response(stream_with_context(generate()), mimetype='application/x-ndjson',
         headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no','Access-Control-Allow-Origin':'*'})
 
