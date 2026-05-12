@@ -1,59 +1,48 @@
 """
-JINNI ZERO — Jinni Continuum
-=============================
+JINNI ZERO — Jinni Continuum (Bar-Close Execution)
+====================================================
 Pure price-action momentum continuation strategy.
 
-ENTRY
-  BUY:  N consecutive bull candles (close > open) → enter next bar open
-  SELL: N consecutive bear candles (close < open) → enter next bar open
-
-STOP LOSS
-  BUY:  Last (Nth) bull candle's LOW
-  SELL: Last (Nth) bear candle's HIGH
-  (absolute SL — engine computes risk from fill price)
-
-TAKE PROFIT
-  R-multiple of risk (configurable, default 1R)
-  (engine computes at fill time)
-
-NO CANDLE REUSE (toggleable)
-  When ON: candles used for signal confirmation AND candles during
-  the trade CANNOT be reused for the next signal. After a trade
-  closes, counting starts completely fresh.
+LOGIC:
+  Count consecutive same-direction closed bars as they come in.
+  When the count reaches N → fire signal on THAT bar's close.
 
   Example (confirm_bars=2):
-    Bar 1: bull (count=1)
-    Bar 2: bull (count=2) → BUY signal fires
-    Bar 3: trade opens at open, TP hit → trade closes
-    Bars 1, 2, 3 are ALL used → next count starts from bar 4
+    Bar 5: bullish → bull_count=1
+    Bar 6: bullish → bull_count=2 → BUY fires, entry at bar 6 close
+    Bar 7: bearish → bull_count=0, bear_count=1
 
-  When OFF: only the signal resets the counter. The exit bar
-  itself CAN be counted toward the next signal.
+  This is a RUNNING counter, not a lookback.
 
-No indicators required — pure candle structure.
+STOP LOSS:
+  BUY:  current bar's low (the bar that triggered the signal)
+  SELL: current bar's high
+
+TAKE PROFIT:
+  R-multiple of risk (configurable, default 1R)
+
+NO CANDLE REUSE:
+  After trade closes, reset counter to 0 so bars already used
+  for the previous signal/trade cannot contribute to the next
+  one.  The very next bar after exit is free to start a fresh
+  count — no artificial cooldown.
 """
 from __future__ import annotations
-
 from typing import Any, Dict, List, Optional
-
 from backend.strategies.base import BaseStrategy
 
 
 class JinniContinuum(BaseStrategy):
-    # ── Metadata ───────────────────────────────────────────────
     strategy_id = "jinni_continuum"
     name = "Jinni Continuum"
     description = (
-        "Momentum continuation: N consecutive bull/bear candles → "
-        "entry at next bar open, SL at last candle's low/high, "
-        "TP at configurable R-multiple. Optional candle reuse prevention."
+        "Momentum continuation: N consecutive bull/bear bars → "
+        "entry at bar close, SL at signal bar's low/high, "
+        "TP at configurable R-multiple."
     )
-    version = "1.0.0"
-    min_lookback = 0  # no indicators, pure price action
+    version = "2.1.0"
+    min_lookback = 0
 
-    # ==========================================================
-    # PARAMETERS
-    # ==========================================================
     parameters = {
         "confirm_bars": {
             "type": "number",
@@ -62,7 +51,7 @@ class JinniContinuum(BaseStrategy):
             "min": 1,
             "max": 10,
             "step": 1,
-            "help": "Consecutive same-direction candles needed before entry.",
+            "help": "Consecutive same-direction bars needed. e.g. 2 = current + previous both bullish → BUY.",
         },
         "r_multiple": {
             "type": "number",
@@ -77,37 +66,23 @@ class JinniContinuum(BaseStrategy):
             "type": "boolean",
             "label": "No Candle Reuse",
             "default": True,
-            "help": (
-                "When ON, all candles used for signal + trade are consumed. "
-                "Must wait for completely fresh candles after trade closes."
-            ),
+            "help": "After trade closes, reset counter so signal-bars can't feed the next entry.",
         },
     }
 
-    # ==========================================================
-    # INDICATORS — none needed
-    # ==========================================================
     def build_indicators(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
 
-    # ==========================================================
-    # INIT
-    # ==========================================================
     def on_init(self, ctx: Any) -> None:
         s = ctx.state
         s["bull_count"] = 0
         s["bear_count"] = 0
-        s["last_used_bar"] = -1        # last bar index consumed by signal/trade
-        s["_last_trade_count"] = 0     # for detecting new trade closes
+        s["_last_trade_count"] = 0
 
-    # ==========================================================
-    # ON BAR
-    # ==========================================================
     def on_bar(self, ctx: Any) -> Optional[Dict[str, Any]]:
         s = ctx.state
         p = ctx.params
         bar = ctx.bar
-        i = ctx.index
 
         c = float(bar["close"])
         o = float(bar["open"])
@@ -118,116 +93,66 @@ class JinniContinuum(BaseStrategy):
         bear = c < o
 
         confirm_bars = int(p.get("confirm_bars", 2))
-        r_multiple = float(p.get("r_multiple", 1.0))
-        no_reuse = bool(p.get("no_reuse", True))
+        r_multiple   = float(p.get("r_multiple", 1.0))
+        no_reuse     = bool(p.get("no_reuse", True))
 
         # ══════════════════════════════════════════════════════
-        # UPDATE LAST USED BAR FROM CLOSED TRADES
-        #
-        # If a trade closed since last check, mark the exit bar
-        # as the last used bar (prevents reuse of exit bar and
-        # all bars before it that were part of the trade).
+        # TRADE CLOSED → just reset counters, no cooldown
         # ══════════════════════════════════════════════════════
         if no_reuse:
             trades = ctx.trades
             last_count = s.get("_last_trade_count", 0)
             if len(trades) > last_count:
-                last_trade = trades[-1]
-                exit_bar = last_trade.get("exit_bar", i)
-                s["last_used_bar"] = exit_bar
-                # Reset counters — fresh start after trade
                 s["bull_count"] = 0
                 s["bear_count"] = 0
             s["_last_trade_count"] = len(trades)
 
         # ══════════════════════════════════════════════════════
         # IN POSITION → HOLD
-        # Engine handles SL/TP exits.
         # ══════════════════════════════════════════════════════
         if ctx.position.has_position:
             return {"signal": "HOLD"}
 
         # ══════════════════════════════════════════════════════
-        # CANDLE REUSE CHECK
+        # COUNT CONSECUTIVE BARS
         #
-        # If no_reuse is ON and this bar is at or before the
-        # last used bar, skip it entirely.
-        # ══════════════════════════════════════════════════════
-        if no_reuse and i <= s.get("last_used_bar", -1):
-            s["bull_count"] = 0
-            s["bear_count"] = 0
-            return None
-
-        # ══════════════════════════════════════════════════════
-        # COUNT CONSECUTIVE CANDLES
-        #
-        # Bull: close > open → increment bull, reset bear
-        # Bear: close < open → increment bear, reset bull
-        # Doji: close == open → reset both (not directional)
+        # Each closed bar: if bullish → bull_count++, reset bear
+        #                  if bearish → bear_count++, reset bull
+        #                  if doji    → reset both
         # ══════════════════════════════════════════════════════
         if bull:
-            s["bull_count"] = s.get("bull_count", 0) + 1
+            s["bull_count"] += 1
             s["bear_count"] = 0
         elif bear:
-            s["bear_count"] = s.get("bear_count", 0) + 1
+            s["bear_count"] += 1
             s["bull_count"] = 0
         else:
-            # Doji — breaks the streak
+            # doji — breaks streak
             s["bull_count"] = 0
             s["bear_count"] = 0
             return None
 
         # ══════════════════════════════════════════════════════
-        # CHECK SIGNAL
+        # CHECK IF COUNT REACHED → FIRE SIGNAL
         # ══════════════════════════════════════════════════════
-        sig = None
-        sl_price = None
-
-        # ── BUY: N consecutive bull candles ───────────────────
         if s["bull_count"] >= confirm_bars:
-            sig = "BUY"
-            sl_price = l  # last bull candle's low
-
-            # Reset counters
             s["bull_count"] = 0
             s["bear_count"] = 0
+            return {
+                "signal": "BUY",
+                "sl": l,                    # this bar's low
+                "tp_mode": "r_multiple",
+                "tp_r": r_multiple,
+            }
 
-            # Mark signal bar as used
-            if no_reuse:
-                s["last_used_bar"] = i
-
-        # ── SELL: N consecutive bear candles ──────────────────
-        elif s["bear_count"] >= confirm_bars:
-            sig = "SELL"
-            sl_price = h  # last bear candle's high
-
-            # Reset counters
+        if s["bear_count"] >= confirm_bars:
             s["bull_count"] = 0
             s["bear_count"] = 0
+            return {
+                "signal": "SELL",
+                "sl": h,                    # this bar's high
+                "tp_mode": "r_multiple",
+                "tp_r": r_multiple,
+            }
 
-            # Mark signal bar as used
-            if no_reuse:
-                s["last_used_bar"] = i
-
-        if sig is None:
-            return None
-
-        # ══════════════════════════════════════════════════════
-        # BUILD SIGNAL
-        #
-        # SL: absolute price (candle low/high)
-        # TP: engine-computed R-multiple at fill time
-        #
-        # Engine flow at next bar open:
-        #   1. entry_price = next bar open
-        #   2. risk = abs(entry_price - sl_price)
-        #   3. tp = entry_price + risk * R  (long)
-        #        or entry_price - risk * R  (short)
-        #   4. spread applied to all three
-        # ══════════════════════════════════════════════════════
-        return {
-            "signal": sig,
-            "sl": sl_price,
-            "tp_mode": "r_multiple",
-            "tp_r": r_multiple,
-        }
+        return None

@@ -1,76 +1,64 @@
 """
-JINNI ZERO — Centralized Dollar Conversion
-===========================================
-This is the ONE AND ONLY place where points → dollars conversion happens.
+JINNI ZERO — Simplified Dollar Math
+====================================
+Single source of truth for ALL PnL calculations.
 
-backend/dollar_math.py
-
-Used by:
-  - backtest_server.py (legacy mode)
-  - engine_core.py (strategy mode)
-  - live engine (future)
-
-Formula:
-  dollars = points × lot_size × point_value
-
-Where:
-  points      = price movement (exit - entry, direction-adjusted)
-  lot_size    = number of contracts/lots (default 1.0)
-  point_value = dollar value per 1.0 point move per lot (default 1.0)
-
-Examples:
-  NQ Futures:  point_value = 20  → 1 point × 1 lot = $20
-  ES Futures:  point_value = 50  → 1 point × 1 lot = $50
-  Custom:      point_value = 1   → 1 point × 1 lot = $1 (default)
-
-R-multiples are computed BEFORE dollar conversion and are
-independent of lot_size / point_value.
+Model:
+  pnl        = lot_size × point_value × points_moved
+  commission = commission_per_1_lot × lot_size
+  spread:  BUY entry  = close + spread_points
+           SELL entry = close - spread_points
 """
 from __future__ import annotations
 import math
 
 
-def points_to_dollars(
-    points: float,
-    lot_size: float = 1.0,
-    point_value: float = 1.0,
-) -> float:
-    """
-    THE single conversion function.
-    Every dollar calculation in the system MUST call this.
-    """
+def points_to_dollars(points: float, lot_size: float = 1.0, point_value: float = 1.0) -> float:
+    """THE single conversion. Every dollar calc MUST call this."""
     return points * lot_size * point_value
+
+
+def calc_commission(lot_size: float, commission_per_1_lot: float = 0.0) -> float:
+    """commission = commission_per_1_lot × lot_size"""
+    return lot_size * commission_per_1_lot
+
+
+def apply_spread_entry(close_price: float, direction: str, spread_points: float = 0.0) -> float:
+    """Apply fixed spread at entry. BUY = worse ask, SELL = worse bid."""
+    if spread_points <= 0:
+        return close_price
+    if direction == "long":
+        return close_price + spread_points
+    return close_price - spread_points
 
 
 def finalize_trade_pnl(
     closed: dict,
     lot_size: float = 1.0,
     point_value: float = 1.0,
-    commission: float = 0.0,
+    commission_per_1_lot: float = 0.0,
 ) -> None:
     """
     Compute ALL dollar + R fields on a closed trade dict (in-place).
 
-    Order of operations:
+    Order:
       1. Points PnL (direction-aware)
       2. Risk in points (from SL)
-      3. R-multiple (PURE — no dollars, no lot_size, no point_value)
-      4. Dollar PnL (centralized conversion)
+      3. R-multiple (pure — no dollars)
+      4. Gross dollar PnL
       5. Commission
       6. Net PnL
-      7. MAE/MFE dollars
-
-    This function is called by BOTH legacy and strategy engines.
+      7. MAE / MFE dollars
     """
     d  = closed["direction"]
     ep = closed["entry_price"]
     xp = closed["exit_price"]
 
-    # ── 1. Points PnL ────────────────────────────────────────────
-    dir_sign = 1 if d == "long" else -1
+    # 1 — points
+    dir_sign   = 1 if d == "long" else -1
     points_pnl = (xp - ep) * dir_sign
 
-    # ── 2. Risk in points (from SL) ──────────────────────────────
+    # 2 — risk
     sl = closed.get("sl_level")
     rp = closed.get("risk_pts")
     if sl is not None:
@@ -78,27 +66,28 @@ def finalize_trade_pnl(
     if rp is None or rp <= 0:
         rp = None
 
-    # ── 3. R-multiple (PURE — independent of dollar settings) ────
-    r_mult = None
-    if rp is not None and rp > 0:
-        r_mult = points_pnl / rp
+    # 3 — R
+    r_mult = (points_pnl / rp) if (rp is not None and rp > 0) else None
 
-    # ── 4. Dollar PnL (centralized) ──────────────────────────────
-    gross_dollar = points_to_dollars(points_pnl, lot_size, point_value)
+    # 4 — dollars
+    trade_lot    = closed.get("lot_size", lot_size)
+    gross_dollar = points_to_dollars(points_pnl, trade_lot, point_value)
 
-    # ── 5. Commission ────────────────────────────────────────────
+    # 5 — commission
+    commission = calc_commission(trade_lot, commission_per_1_lot)
+
+    # 6 — net
     net_dollar = gross_dollar - commission
 
-    # ── 6. Risk / MAE / MFE in dollars (same conversion) ────────
-    risk_dollar = points_to_dollars(rp, lot_size, point_value) if rp and rp > 0 else None
-    mae_dollar  = points_to_dollars(closed.get("mae", 0), lot_size, point_value)
-    mfe_dollar  = points_to_dollars(closed.get("mfe", 0), lot_size, point_value)
+    # 7 — MAE / MFE / risk dollars
+    risk_dollar = points_to_dollars(rp, trade_lot, point_value) if rp and rp > 0 else None
+    mae_dollar  = points_to_dollars(closed.get("mae", 0), trade_lot, point_value)
+    mfe_dollar  = points_to_dollars(closed.get("mfe", 0), trade_lot, point_value)
 
-    # ── Write all fields ─────────────────────────────────────────
     closed.update(
         points_pnl  = round(points_pnl, 4),
         gross_pnl   = round(gross_dollar, 2),
-        commission  = round(commission, 2),
+        commission  = round(commission, 4),
         net_pnl     = round(net_dollar, 2),
         net_pnl_r   = round(r_mult, 3) if r_mult is not None else None,
         risk_pts    = round(rp, 4) if rp is not None else None,
@@ -106,20 +95,3 @@ def finalize_trade_pnl(
         mae_dollar  = round(mae_dollar, 2),
         mfe_dollar  = round(mfe_dollar, 2),
     )
-
-
-def validate_conversion(
-    points: float,
-    lot_size: float,
-    point_value: float,
-    expected_dollars: float,
-) -> bool:
-    """
-    Validation helper. Use in tests to verify consistency.
-
-    Example:
-        validate_conversion(10.0, 1.0, 5.0, 50.0)  # True
-        validate_conversion(10.0, 2.0, 20.0, 400.0) # True
-    """
-    actual = points_to_dollars(points, lot_size, point_value)
-    return abs(actual - expected_dollars) < 0.01

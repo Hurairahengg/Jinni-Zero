@@ -295,8 +295,12 @@ class LegacyReplicator(BaseStrategy):
         # want to exit for a reason the engine doesn't know about.
         # For Legacy replication, the engine handles everything.
         # ══════════════════════════════════════════════════════
+        # ══════════════════════════════════════════════════════
+        # IN POSITION: engine handles SL/TP
+        # Bar-close model: TP/SL checked on FUTURE bars only.
+        # Engine handles all exit logic.
+        # ══════════════════════════════════════════════════════
         if ctx.position.has_position:
-            # Nothing to do — engine handles SL/TP hit + MA cross exits
             return {"signal": "HOLD"}
 
         # ══════════════════════════════════════════════════════
