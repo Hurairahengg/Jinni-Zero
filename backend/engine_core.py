@@ -24,13 +24,17 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from backend.stats_engine import compute_all_stats, downsample_curve
-from backend.dollar_math import points_to_dollars, finalize_trade_pnl
+from backend.dollar_math import (
+    points_to_dollars,
+    finalize_trade_pnl,
+    compute_position_size,
+    compute_scaling_risk,
+)
 from backend.strategies.base import VALID_SIGNALS
 from backend.shared import (
     precompute_ma,
     get_or_compute_ma,
     SpreadGenerator,
-    calc_comm,
     compute_analytics,
     clean_for_json,
     cap_analytics_arrays,
@@ -145,23 +149,27 @@ class PositionState:
     tp_level:        Optional[float] = None
     unrealized_pts:  float           = 0.0
     unrealized_pnl:  float           = 0.0
+    unrealized_r:    Optional[float] = None
     mae:             float           = 0.0
     mfe:             float           = 0.0
 
 
-def _build_position_state(open_t, bar_index, close_price, lot_size, point_value=1.0):
+def _build_position_state(open_t, bar_index, close_price, lot_size, point_value=1.0, dollar_per_point=1.0):
     if open_t is None:
         return PositionState(has_position=False)
     d = open_t["direction"]
     ep = open_t["entry_price"]
     pts = (close_price - ep) if d == "long" else (ep - close_price)
+    rp = open_t.get("risk_pts")
+    ur = round(pts / rp, 3) if rp and rp > 0 else None
     return PositionState(
         has_position=True, direction=d, entry_price=ep,
         entry_time=open_t.get("entry_time"), entry_bar=open_t.get("entry_bar"),
         bars_held=bar_index - open_t.get("entry_bar", 0),
         sl_level=open_t.get("sl_level"), tp_level=open_t.get("tp_level"),
         unrealized_pts=round(pts, 4),
-        unrealized_pnl=round(points_to_dollars(pts, lot_size, point_value), 2),
+        unrealized_pnl=round(points_to_dollars(pts, lot_size, point_value, dollar_per_point), 2),
+        unrealized_r=ur,
         mae=round(open_t.get("mae", 0), 4),
         mfe=round(open_t.get("mfe", 0), 4),
     )
@@ -211,14 +219,22 @@ class BacktestEngine:
 
         self.lot_size       = float(self.payload.get("lot_size", 1.0))
         self.point_value    = float(self.payload.get("point_value", 1.0))
+        self.dollar_per_point = float(self.payload.get("dollar_per_point", 1.0))
         self.starting_cap   = float(self.payload.get("starting_capital", 10000.0))
-        self.comm_cfg       = self.payload.get("commission", {})
+        self.commission_per_lot = float(self.payload.get("commission_per_lot", 0))
         self.ambiguous_mode = self.payload.get("ambiguous_bar_mode", "conservative")
 
         self.spread_gen = SpreadGenerator(self.payload.get("spread", {}))
         # ── Position sizing ──────────────────────────────────────
-        self.sizing_mode = str(self.payload.get("sizing_mode", "fixed")).lower()
+        self.sizing_mode = str(self.payload.get("sizing_mode", "fixed")).strip().lower()
         self.risk_pct = float(self.payload.get("risk_pct", 1.0))
+        self.fixed_risk = float(self.payload.get("fixed_risk", 10.0))
+        self.scaling_enabled = bool(self.payload.get("scaling_enabled", False))
+        self.scaling_per = float(self.payload.get("scaling_per", 100.0))
+        self.scaling_risk = float(self.payload.get("scaling_risk", 1.0))
+        self.min_lot = float(self.payload.get("min_lot", 0.01))
+        self.max_lot = float(self.payload.get("max_lot", 1000.0))
+        self.lot_step = float(self.payload.get("lot_step", 0.01))
 
         strategy_min = getattr(strategy, "min_lookback", 0) or 0
         user_override = int(self.payload.get("lookback_override", 0) or 0)
@@ -240,7 +256,7 @@ class BacktestEngine:
                      else f"risk={self.risk_pct}%"
         print(
             f"  [ENGINE] {self.n} bars | strategy={strategy.strategy_id} | "
-            f"{sizing_str} | pv={self.point_value} | cap={self.starting_cap} | "
+            f"{sizing_str} | pv={self.point_value} | dpp={self.dollar_per_point} | cap={self.starting_cap} | "
             f"lookback={self.lookback} | spread={self.spread_gen.enabled} | "
             f"ambiguous={self.ambiguous_mode}"
         )
@@ -255,7 +271,7 @@ class BacktestEngine:
     def _build_ctx(self, i, bar, open_t, cum, equity, prev_indicators=None):
         trade_lot = open_t.get("lot_size", self.lot_size) if open_t else self.lot_size
         pos_state = _build_position_state(
-            open_t, i, float(bar["close"]), trade_lot, self.point_value
+            open_t, i, float(bar["close"]), trade_lot, self.point_value, self.dollar_per_point
         )
         return StrategyContext(
             index=i, bar=bar, bars=self.bars,
@@ -343,11 +359,12 @@ class BacktestEngine:
         }
 
     def _finalize_trade(self, closed):
-        commission = calc_comm(self.comm_cfg)
+        commission = round(closed.get("lot_size", self.lot_size) * self.commission_per_lot, 5)
         trade_lot = closed.get("lot_size", self.lot_size)
         finalize_trade_pnl(
             closed, lot_size=trade_lot,
-            point_value=self.point_value, commission=commission,
+            point_value=self.point_value, dollar_per_point=self.dollar_per_point,
+            commission=commission,
         )
 
     def _close_trade(self, open_t, bar, bi, exit_price, reason, cum):
@@ -359,9 +376,12 @@ class BacktestEngine:
 
         closed = self._make_exit(open_t, bar, bi, exit_price, reason)
         trade_spread = closed.get("spread", 0.0)
-        closed["exit_price"] = round(
-            self.spread_gen.apply_exit(exit_price, closed["direction"], trade_spread), 4
-        )
+        # Only apply exit spread for market-price exits.
+        # SL_HIT / TP_R exit prices already include spread from entry setup.
+        if reason not in ("SL_HIT", "TP_R"):
+            closed["exit_price"] = round(
+                self.spread_gen.apply_exit(exit_price, closed["direction"], trade_spread), 4
+            )
         closed.pop("_engine_sl_ma_key", None)
         closed.pop("_engine_tp_ma_key", None)
 
@@ -410,12 +430,11 @@ class BacktestEngine:
         for i, bar in enumerate(self.bars):
             c = float(bar["close"]); o = float(bar["open"])
             h = float(bar["high"]);  l = float(bar["low"])
-            just_entered = False
 
             # ══ STEP 1: Process pending entry ═══════════════════
             if pending_signal is not None and state == "flat":
                 direction = pending_signal["direction"]
-                ep = o
+                ep = pending_signal.get("entry_price", o)
 
                 sl_level = None; risk_pts = None
                 sl_mode = pending_signal.get("sl_mode")
@@ -462,35 +481,60 @@ class BacktestEngine:
                     if direction == "long"  and tp_level <= ep: valid = False
                     if direction == "short" and tp_level >= ep: valid = False
 
-                # ── Dynamic position sizing ──────────────────────
-                if valid and self.sizing_mode == "risk_pct":
+                # ── Dynamic position sizing (centralized) ────────
+                trade_lot = self.lot_size
+                if valid and self.sizing_mode in ("risk_pct", "risk_per_trade"):
                     if risk_pts is None or risk_pts <= 0:
-                        valid = False  # can't compute lot without SL distance
+                        valid = False
                     else:
                         balance_now = self.starting_cap + cum
-                        risk_amount = balance_now * (self.risk_pct / 100.0)
-                        trade_lot = risk_amount / (risk_pts * self.point_value)
-                        trade_lot = max(0.01, round(trade_lot, 2))
+
+                        risk_amount = 0.0
+                        if self.sizing_mode == "risk_pct":
+                            risk_amount = balance_now * (self.risk_pct / 100.0)
+                        elif self.scaling_enabled:
+                            risk_amount, sc_log = compute_scaling_risk(
+                                balance_now, self.scaling_per, self.scaling_risk)
+                            if len(self.trades) < 5:
+                                print(f"  {sc_log}")
+                        else:
+                            risk_amount = self.fixed_risk
+
+                        if risk_amount <= 0:
+                            valid = False
+                        else:
+                            trade_lot, sz_log, sz_ok = compute_position_size(
+                                risk_amount, risk_pts, self.point_value,
+                                self.min_lot, self.max_lot, self.lot_step,
+                                self.commission_per_lot, self.dollar_per_point,
+                            )
+                            if len(self.trades) < 5:
+                                print(f"  {sz_log}")
+                            if not sz_ok or trade_lot is None:
+                                valid = False
                 else:
                     trade_lot = self.lot_size
 
                 if valid:
                     open_t = dict(
                         id=len(self.trades) + 1, direction=direction,
-                        entry_bar=i, entry_time=bar["time"],
+                        entry_bar=pending_signal.get("signal_bar", i),
+                        entry_time=pending_signal.get("signal_time", bar["time"]),
                         entry_price=round(ep, 4),
                         sl_level=sl_level, tp_level=tp_level,
-                        risk_pts=risk_pts, mae=0.0, mfe=0.0, bars_held=0,
+                        initial_sl=sl_level, initial_tp=tp_level,
+                        risk_pts=risk_pts, initial_risk_pts=risk_pts,
+                        mae=0.0, mfe=0.0, bars_held=0,
                         spread=round(trade_spread, 4),
                         lot_size=trade_lot,
                         _engine_sl_ma_key=pending_signal.get("engine_sl_ma_key"),
                         _engine_tp_ma_key=pending_signal.get("engine_tp_ma_key"),
                     )
-                    state = direction; just_entered = True
+                    state = direction
                 pending_signal = None
 
-            # ══ STEP 2: Check exits ═════════════════════════════
-            if state != "flat" and open_t is not None and not just_entered:
+            # ══ STEP 2: Exit check (BEFORE management — uses previous bar's SL/TP)
+            if state != "flat" and open_t is not None:
                 closed = self._check_exit(open_t, bar, i)
                 if closed:
                     cum = self._close_trade(
@@ -499,21 +543,16 @@ class BacktestEngine:
                     last_closed_pnl = self.trades[-1]["net_pnl"]
                     open_t = None; state = "flat"
 
-            # ── MAE/MFE on entry bar ─────────────────────────────
-            if state != "flat" and open_t is not None and just_entered:
-                d = open_t["direction"]; ep2 = open_t["entry_price"]
-                open_t["mae"] = max(open_t.get("mae", 0), (ep2 - l) if d == "long" else (h - ep2))
-                open_t["mfe"] = max(open_t.get("mfe", 0), (h - ep2) if d == "long" else (ep2 - l))
-
-            # ══ STEP 3: Get strategy signal ═════════════════════
+            # ══ STEP 3: Strategy call ═══════════════════════════
             action = {"signal": "HOLD"}
+            ctx = None
             if i >= self.lookback:
                 equity_now = self.starting_cap + cum
                 if state != "flat" and open_t:
                     pts = (c - open_t["entry_price"]) if state == "long" \
                           else (open_t["entry_price"] - c)
                     t_lot = open_t.get("lot_size", self.lot_size)
-                    equity_now += points_to_dollars(pts, t_lot, self.point_value)
+                    equity_now += points_to_dollars(pts, t_lot, self.point_value, self.dollar_per_point)
                 ctx = self._build_ctx(i, bar, open_t, cum, equity_now, prev_indicators)
                 raw_signal = self.strategy.on_bar(ctx)
                 try:
@@ -522,32 +561,89 @@ class BacktestEngine:
                     logger.error(str(e)); action = {"signal": "HOLD"}
             sig = action["signal"]
 
-            # ══ STEP 4: Process CLOSE ═══════════════════════════
+            # ══ STEP 4: Process CLOSE signal
             if action.get("close") and state != "flat" and open_t is not None:
                 reason = action.get("close_reason", "strategy_close")
                 cum = self._close_trade(open_t, bar, i, c, reason, cum)
                 last_closed_pnl = self.trades[-1]["net_pnl"]
                 open_t = None; state = "flat"
+                # Re-call strategy flat to check for flip
                 if i >= self.lookback:
                     eq_now = self.starting_cap + cum
-                    ctx2 = self._build_ctx(i, bar, None, cum, eq_now, prev_indicators)
-                    raw2 = self.strategy.on_bar(ctx2)
+                    ctx = self._build_ctx(i, bar, None, cum, eq_now, prev_indicators)
+                    raw2 = self.strategy.on_bar(ctx)
                     try: action = validate_signal(raw2, i)
                     except ValueError: action = {"signal": "HOLD"}
                     sig = action["signal"]
 
-            # ══ STEP 5: Dynamic SL/TP updates ═══════════════════
-            if state != "flat" and open_t is not None:
-                if "update_sl" in action and action["update_sl"] is not None:
-                    open_t["sl_level"] = float(action["update_sl"])
-                if "update_tp" in action and action["update_tp"] is not None:
-                    open_t["tp_level"] = float(action["update_tp"])
+            # ══ STEP 5: Trade management (on_manage + on_bar updates) ═══
+            if state != "flat" and open_t is not None and ctx is not None:
+                # on_manage hook
+                mgmt = None
+                try:
+                    mgmt = self.strategy.on_manage(ctx)
+                except Exception as e:
+                    logger.error(f"Bar {i}: on_manage error: {e}")
 
-            # ══ STEP 6: BUY/SELL → set pending ═════════════════
+                if mgmt and isinstance(mgmt, dict):
+                    if mgmt.get("close") and not action.get("close"):
+                        reason = str(mgmt.get("close_reason", "management_close"))
+                        cum = self._close_trade(open_t, bar, i, c, reason, cum)
+                        last_closed_pnl = self.trades[-1]["net_pnl"]
+                        open_t = None; state = "flat"
+                        mgmt = None
+                    else:
+                        if mgmt.get("update_sl") is not None and action.get("update_sl") is None:
+                            action["update_sl"] = mgmt["update_sl"]
+                        if mgmt.get("update_tp") is not None and action.get("update_tp") is None:
+                            action["update_tp"] = mgmt["update_tp"]
+
+            # ══ STEP 6: Apply & validate SL/TP updates ═════════
+            #   Updates take effect on NEXT bar's exit check (Step 2).
+            if state != "flat" and open_t is not None:
+                d = open_t["direction"]
+
+                if action.get("update_sl") is not None:
+                    new_sl = float(action["update_sl"])
+                    old_sl = open_t.get("sl_level")
+                    reject = False
+                    # Reject if SL is already inside the current bar
+                    if d == "long" and new_sl >= h:
+                        reject = True
+                    elif d == "short" and new_sl <= l:
+                        reject = True
+                    if not reject:
+                        open_t["sl_level"] = new_sl
+                        if len(self.trades) < 5:
+                            logger.info(
+                                f"  [MANAGER] Bar {i}: SL "
+                                f"{round(old_sl,4) if old_sl else 'None'}->"
+                                f"{round(new_sl,4)} ({d})")
+
+                if action.get("update_tp") is not None:
+                    new_tp = float(action["update_tp"])
+                    old_tp = open_t.get("tp_level")
+                    reject = False
+                    if d == "long" and new_tp <= open_t["entry_price"]:
+                        reject = True
+                    elif d == "short" and new_tp >= open_t["entry_price"]:
+                        reject = True
+                    if not reject:
+                        open_t["tp_level"] = new_tp
+                        if len(self.trades) < 5:
+                            logger.info(
+                                f"  [MANAGER] Bar {i}: TP "
+                                f"{round(old_tp,4) if old_tp else 'None'}->"
+                                f"{round(new_tp,4)} ({d})")
+
+            # ══ STEP 7: BUY/SELL → set pending ═════════════════
             if state == "flat" and sig in ("BUY", "SELL"):
                 direction = "long" if sig == "BUY" else "short"
                 pending_signal = {
                     "direction": direction,
+                    "entry_price": c,
+                    "signal_bar": i,
+                    "signal_time": bar["time"],
                     "sl": action.get("sl"), "tp": action.get("tp"),
                     "sl_mode": action.get("sl_mode"), "sl_pts": action.get("sl_pts"),
                     "sl_ma_key": action.get("sl_ma_key"), "sl_ma_val": action.get("sl_ma_val"),
@@ -556,12 +652,12 @@ class BacktestEngine:
                     "engine_tp_ma_key": action.get("engine_tp_ma_key"),
                 }
 
-            # ══ STEP 7: Equity / drawdown ═══════════════════════
+            # ══ STEP 8: Equity / drawdown ═══════════════════════
             if state != "flat" and open_t:
                 pts = (c - open_t["entry_price"]) if state == "long" \
                       else (open_t["entry_price"] - c)
                 t_lot = open_t.get("lot_size", self.lot_size)
-                unrealised = points_to_dollars(pts, t_lot, self.point_value)
+                unrealised = points_to_dollars(pts, t_lot, self.point_value, self.dollar_per_point)
             else:
                 unrealised = 0.0
             eq = self.starting_cap + cum + unrealised
@@ -660,8 +756,13 @@ class BacktestEngine:
                 range=int(self.payload.get("range", 10)),
                 lot_size=self.lot_size,
                 point_value=self.point_value,
+                dollar_per_point=self.dollar_per_point,
                 sizing_mode=self.sizing_mode,
                 risk_pct=self.risk_pct,
+                fixed_risk=self.fixed_risk,
+                scaling_enabled=self.scaling_enabled,
+                scaling_per=self.scaling_per,
+                scaling_risk=self.scaling_risk,
             ),
         )
 

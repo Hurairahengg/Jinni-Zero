@@ -1,3 +1,1050 @@
+# Repository Snapshot - Part 2 of 5
+
+- Root folder: `/home/hurairahengg/Documents/Jinni Zero`
+- You know my wholle Jinjnibacktester simulator thign whre ther is a UI bascially and then i can see  charst and stuff when i need to run simulatiosn liek i send simulatio nto my flask backend server it runs sims and then shows stast and stuff and i can load strategy and shit for now take a look we will be doing bug fixes and some validation and shit. udnerrtsnad each code and its role how it works and keep in ir conetxt i will ask u exactly wha tto do later code later duinerstood
+- Total files indexed: `24`
+- Files in this chunk: `6`
+## Full Project Tree
+
+```text
+.gitignore
+backend/__init__.py
+backend/dollar_math.py
+backend/engine_core.py
+backend/shared.py
+backend/stats_engine.py
+backend/strategies/__init__.py
+backend/strategies/base.py
+backend/strategies/idk.py
+backend/strategies/JinniContiniumV2.py
+backend/strategies/JinniScalperXzero.py
+backend/strategies/legacyReplicator.py
+backend/strategy_api.py
+backend/strategy_loader.py
+backtest_server.py
+bars/range_bars.py
+index.html
+js/backtest.js
+js/chart.js
+js/currency.js
+js/strategy_loader.js
+STRATEGY_GUIDE.txt
+styles.css
+test.py
+```
+
+## Files In This Chunk - Part 2
+
+```text
+backend/__init__.py
+backend/strategies/__init__.py
+backend/strategies/base.py
+backend/strategies/JinniContiniumV2.py
+backend/strategies/legacyReplicator.py
+js/backtest.js
+```
+
+## File Contents
+
+
+---
+
+## FILE: `backend/__init__.py`
+
+```python
+# backend/__init__.py
+```
+
+---
+
+## FILE: `backend/strategies/__init__.py`
+
+```python
+# backend/strategy_loader.py
+from __future__ import annotations
+
+import importlib
+import inspect
+import pkgutil
+import sys
+from typing import Dict, List
+
+from backend.strategies.base import BaseStrategy
+import backend.strategies as strategies_pkg
+
+
+def _iter_strategy_module_names():
+    """
+    Iterate over python modules inside backend/strategies/
+    while skipping base.py, __init__.py, and private files.
+    """
+    for mod in pkgutil.iter_modules(strategies_pkg.__path__):
+        name = mod.name
+        if name in {"base", "__init__"}:
+            continue
+        if name.startswith("_"):
+            continue
+        yield name
+
+
+def _load_strategy_module(module_name: str):
+    """
+    Import (or reload) a strategy module.
+    Reloading is helpful during development so edits are picked up.
+    """
+    full_name = f"backend.strategies.{module_name}"
+    importlib.invalidate_caches()
+
+    if full_name in sys.modules:
+        return importlib.reload(sys.modules[full_name])
+
+    return importlib.import_module(full_name)
+
+
+def _extract_strategy_instances(module) -> List[BaseStrategy]:
+    """
+    Find all BaseStrategy subclasses inside a loaded module
+    and return instantiated strategy objects.
+    """
+    found = []
+
+    for _, obj in inspect.getmembers(module, inspect.isclass):
+        # must be a real subclass of BaseStrategy, not BaseStrategy itself
+        if not issubclass(obj, BaseStrategy):
+            continue
+        if obj is BaseStrategy:
+            continue
+
+        # avoid importing classes re-exported from other modules
+        if obj.__module__ != module.__name__:
+            continue
+
+        instance = obj()
+
+        if not getattr(instance, "strategy_id", ""):
+            # fallback to module/class-derived id if missing
+            instance.strategy_id = obj.__name__.replace("Strategy", "").lower()
+
+        found.append(instance)
+
+    return found
+
+
+def discover_strategies() -> Dict[str, BaseStrategy]:
+    """
+    Discover all strategy plugins under backend/strategies/
+    and return a registry: {strategy_id: strategy_instance}
+    """
+    registry: Dict[str, BaseStrategy] = {}
+
+    for module_name in _iter_strategy_module_names():
+        module = _load_strategy_module(module_name)
+        instances = _extract_strategy_instances(module)
+
+        for instance in instances:
+            strategy_id = str(instance.strategy_id).strip()
+
+            if not strategy_id:
+                raise ValueError(
+                    f"Strategy in module '{module_name}' is missing a valid strategy_id"
+                )
+
+            if strategy_id in registry:
+                raise ValueError(
+                    f"Duplicate strategy_id detected: '{strategy_id}' "
+                    f"(module '{module_name}')"
+                )
+
+            registry[strategy_id] = instance
+
+    return registry
+
+
+def get_strategy(strategy_id: str) -> BaseStrategy:
+    """
+    Return one strategy instance by ID.
+    """
+    registry = discover_strategies()
+
+    if strategy_id not in registry:
+        available = ", ".join(sorted(registry.keys())) if registry else "(none found)"
+        raise KeyError(
+            f"Unknown strategy '{strategy_id}'. Available strategies: {available}"
+        )
+
+    return registry[strategy_id]
+
+
+def list_strategy_metadata() -> List[dict]:
+    """
+    Return metadata for all discovered strategies.
+    """
+    registry = discover_strategies()
+
+    out = []
+    for strategy_id in sorted(registry.keys()):
+        strategy = registry[strategy_id]
+        meta = strategy.get_metadata()
+
+        # ensure id is always consistent
+        meta["id"] = strategy.strategy_id
+        out.append(meta)
+
+    return out
+```
+
+---
+
+## FILE: `backend/strategies/base.py`
+
+```python
+"""
+JINNI ZERO — Strategy Base Class (Signal-Only Interface)
+========================================================
+Strategies are SIGNAL PROVIDERS ONLY.
+
+They output:  BUY / SELL / HOLD / CLOSE + optional SL/TP
+They do NOT:  sizing, PnL, equity, commission, spread, stats
+
+The engine is the single source of truth for execution.
+"""
+from __future__ import annotations
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional
+
+
+# ── Valid signal constants ────────────────────────────────────
+SIGNAL_BUY   = "BUY"
+SIGNAL_SELL  = "SELL"
+SIGNAL_HOLD  = "HOLD"
+SIGNAL_CLOSE = "CLOSE"
+
+VALID_SIGNALS = {SIGNAL_BUY, SIGNAL_SELL, SIGNAL_HOLD, SIGNAL_CLOSE, None}
+
+
+class BaseStrategy(ABC):
+    """
+    All strategies MUST subclass this.
+
+    Lifecycle:
+        1. Engine calls build_indicators(params) → precomputes indicator series
+        2. Engine calls on_init(ctx)             → strategy initializes state
+        3. For each bar:
+           a. Engine calls on_bar(ctx)           → strategy returns signal
+           b. If in position: engine calls on_manage(ctx) → trade management
+        4. Engine calls on_end(ctx)              → strategy cleanup
+    """
+
+    # ── Required metadata ─────────────────────────────────────
+    strategy_id:   str = ""
+    name:          str = ""
+    description:   str = ""
+    version:       str = "1.0"
+
+    # ── Lookback: minimum bars before strategy can fire signals ─
+    # Engine will pass HOLD for all bars before this index.
+    # User can override to a higher value via payload.lookback_override.
+    min_lookback:  int = 0
+
+    # ==========================================================
+    # METADATA
+    # ==========================================================
+    def get_metadata(self) -> Dict[str, Any]:
+        return {
+            "id":            self.strategy_id,
+            "name":          self.name or self.strategy_id,
+            "description":   self.description or "",
+            "version":       self.version,
+            "min_lookback":  self.min_lookback,
+            "parameters":    self.get_parameter_schema(),
+        }
+
+    def get_parameter_schema(self) -> Dict[str, Any]:
+        """Override to declare strategy-specific parameters for UI."""
+        return getattr(self, "parameters", {})
+
+    def get_default_parameters(self) -> Dict[str, Any]:
+        schema = self.get_parameter_schema()
+        defaults = {}
+        for k, spec in schema.items():
+            if isinstance(spec, dict) and "default" in spec:
+                defaults[k] = spec["default"]
+        return defaults
+
+    def validate_parameters(self, raw_params: Dict[str, Any]) -> Dict[str, Any]:
+        params = dict(self.get_default_parameters())
+        for k, v in (raw_params or {}).items():
+            params[k] = v
+        return params
+
+    # ==========================================================
+    # INDICATORS (optional — engine precomputes these)
+    # ==========================================================
+    def build_indicators(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Return indicator specs for engine precomputation.
+        Each spec: {"key": "hma_200", "kind": "HMA", "period": 200, "source": "close"}
+        Strategy can also precompute its own in on_init() using ctx.bars.
+        """
+        return []
+
+    # ==========================================================
+    # LIFECYCLE HOOKS
+    # ==========================================================
+    def on_init(self, ctx: Any) -> None:
+        """Called ONCE before first bar. Initialize ctx.state here."""
+        pass
+
+    def on_end(self, ctx: Any) -> None:
+        """Called ONCE after last bar."""
+        pass
+
+    # ==========================================================
+    # MAIN — SIGNAL GENERATION (the ONLY job of a strategy)
+    # ==========================================================
+    @abstractmethod
+    def on_bar(self, ctx: Any) -> Optional[Dict[str, Any]]:
+        """
+        Called once per bar.
+
+        ctx provides (READ-ONLY except ctx.state):
+            ctx.index       — current bar index
+            ctx.bar         — current OHLCV dict
+            ctx.bars        — all bars (for lookback)
+            ctx.indicators  — engine-precomputed indicator values at i
+            ctx.ind_series  — full indicator series (for lookback)
+            ctx.position    — PositionState (frozen dataclass, read-only)
+            ctx.params      — strategy parameters
+            ctx.state       — mutable dict, persists across bars
+            ctx.trades      — closed trades list (read-only)
+            ctx.equity      — current mark-to-market equity
+            ctx.balance     — current realized balance
+
+        MUST return one of:
+
+        ENTRY:
+            {"signal": "BUY",  "sl": float|None, "tp": float|None}
+            {"signal": "SELL", "sl": float|None, "tp": float|None}
+
+        HOLD (no action):
+            {"signal": "HOLD"}  or  None
+
+        CLOSE open position:
+            {"signal": "CLOSE", "close_reason": "my_reason"}
+
+        CLOSE + immediately signal new direction (flip):
+            {"signal": "SELL", "close": True, "close_reason": "flip_short"}
+
+        DYNAMIC SL/TP UPDATE (while in position):
+            {"signal": "HOLD", "update_sl": float, "update_tp": float}
+
+        ❌ NEVER return: size, entry_price, PnL, balance, equity, commission.
+        """
+        raise NotImplementedError("Strategy must implement on_bar()")
+
+    # ==========================================================
+    # TRADE MANAGEMENT (optional — called every bar while in position)
+    # ==========================================================
+    def on_manage(self, ctx: Any) -> Optional[Dict[str, Any]]:
+        """
+        Called every bar when a position is OPEN, after on_bar.
+        Override to implement trade management (trailing stop, breakeven, etc.)
+
+        ctx.position fields available:
+          .has_position    bool
+          .direction       'long' | 'short'
+          .entry_price     float
+          .entry_bar       int
+          .bars_held       int
+          .sl_level        float | None
+          .tp_level        float | None
+          .unrealized_pts  float
+          .unrealized_pnl  float (dollars)
+          .unrealized_r    float | None (R-multiple of floating PnL)
+          .mae             float (max adverse excursion, points)
+          .mfe             float (max favorable excursion, points)
+
+        Return None or {} for no action, or a dict with any of:
+          {"update_sl": new_sl_price}
+          {"update_tp": new_tp_price}
+          {"close": True, "close_reason": "reason_string"}
+
+        on_bar signals take priority over on_manage if both return updates.
+        Strategies that don't override this get no trade management (default).
+        """
+        return None
+```
+
+---
+
+## FILE: `backend/strategies/JinniContiniumV2.py`
+
+```python
+"""
+JINNI ZERO — Jinni Renko Rider
+================================
+Pure renko/range-bar trend-following strategy with trailing stop.
+"""
+from __future__ import annotations
+from typing import Any, Dict, List, Optional
+from backend.strategies.base import BaseStrategy
+
+
+class JinniRenkoRider(BaseStrategy):
+    strategy_id = "jinni_renko_rider"
+    name = "Jinni Renko Rider"
+    description = (
+        "Trend rider: N consecutive same-direction bars → entry, "
+        "SL at last bar's extreme, trails every new favorable bar. "
+        "No TP — rides until reversal hits trailing SL."
+    )
+    version = "1.2.0"
+    min_lookback = 0
+
+    parameters = {
+        "confirm_bars": {
+            "type": "number", "label": "Confirmation Bars",
+            "default": 2, "min": 1, "max": 10, "step": 1,
+            "help": "Consecutive same-direction bars needed before entry.",
+        },
+        "sl_offset": {
+            "type": "number", "label": "SL Offset (pts)",
+            "default": 0, "min": 0, "max": 50, "step": 0.25,
+            "help": "Buffer beyond bar low/high for SL. Prevents exact-wick stops.",
+        },
+        "no_reuse": {
+            "type": "boolean", "label": "No Candle Reuse",
+            "default": True,
+            "help": "Bars used for signal + trade can't count toward next signal.",
+        },
+    }
+
+    def build_indicators(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return []
+
+    def on_init(self, ctx: Any) -> None:
+        s = ctx.state
+        s["bull_count"] = 0
+        s["bear_count"] = 0
+        s["last_used_bar"] = -1
+        s["_last_trade_count"] = 0
+        s["_trail_count"] = 0
+
+    def on_bar(self, ctx: Any) -> Optional[Dict[str, Any]]:
+        s = ctx.state
+        p = ctx.params
+        bar = ctx.bar
+        i = ctx.index
+
+        c = float(bar["close"])
+        o = float(bar["open"])
+        h = float(bar["high"])
+        l = float(bar["low"])
+
+        bull = c > o
+        bear = c < o
+
+        confirm_bars = int(p.get("confirm_bars", 2))
+        sl_offset = float(p.get("sl_offset", 0))
+        no_reuse = bool(p.get("no_reuse", True))
+
+        # ── Update last used bar from closed trades ───────────
+        if no_reuse:
+            trades = ctx.trades
+            last_count = s.get("_last_trade_count", 0)
+            if len(trades) > last_count:
+                last_trade = trades[-1]
+                exit_bar = last_trade.get("exit_bar", i)
+                s["last_used_bar"] = exit_bar
+                s["bull_count"] = 0
+                s["bear_count"] = 0
+            s["_last_trade_count"] = len(trades)
+
+        # ══════════════════════════════════════════════════════
+        # IN POSITION → TRAIL SL via on_bar
+        #
+        # Trailing is done here (not on_manage) because Renko
+        # Rider's trail IS the core signal logic — every
+        # favorable bar tightens the stop. on_manage is for
+        # secondary management (breakeven etc).
+        #
+        # The engine applies update_sl AFTER exit check, so
+        # the new SL takes effect on the NEXT bar. This
+        # prevents same-bar trail→stop-hit.
+        # ══════════════════════════════════════════════════════
+        if ctx.position.has_position:
+            pos = ctx.position
+
+            if pos.direction == "long" and bull:
+                new_sl = l - sl_offset
+                current_sl = pos.sl_level
+                if current_sl is None or new_sl > current_sl:
+                    s["_trail_count"] = s.get("_trail_count", 0) + 1
+                    return {"signal": "HOLD", "update_sl": new_sl}
+
+            elif pos.direction == "short" and bear:
+                new_sl = h + sl_offset
+                current_sl = pos.sl_level
+                if current_sl is None or new_sl < current_sl:
+                    s["_trail_count"] = s.get("_trail_count", 0) + 1
+                    return {"signal": "HOLD", "update_sl": new_sl}
+
+            return {"signal": "HOLD"}
+
+        # ══════════════════════════════════════════════════════
+        # FLAT — look for entry signals
+        # ══════════════════════════════════════════════════════
+        if no_reuse and i <= s.get("last_used_bar", -1):
+            s["bull_count"] = 0
+            s["bear_count"] = 0
+            return None
+
+        if bull:
+            s["bull_count"] = s.get("bull_count", 0) + 1
+            s["bear_count"] = 0
+        elif bear:
+            s["bear_count"] = s.get("bear_count", 0) + 1
+            s["bull_count"] = 0
+        else:
+            s["bull_count"] = 0
+            s["bear_count"] = 0
+            return None
+
+        sig = None
+        sl_price = None
+
+        if s["bull_count"] >= confirm_bars:
+            sig = "BUY"
+            sl_price = l - sl_offset
+            s["bull_count"] = 0
+            s["bear_count"] = 0
+            if no_reuse:
+                s["last_used_bar"] = i
+
+        elif s["bear_count"] >= confirm_bars:
+            sig = "SELL"
+            sl_price = h + sl_offset
+            s["bull_count"] = 0
+            s["bear_count"] = 0
+            if no_reuse:
+                s["last_used_bar"] = i
+
+        if sig is None:
+            return None
+
+        s["_trail_count"] = 0
+
+        return {
+            "signal": sig,
+            "sl": sl_price,
+        }
+```
+
+---
+
+## FILE: `backend/strategies/legacyReplicator.py`
+
+```python
+"""
+JINNI ZERO — Legacy Replicator Strategy
+========================================
+Produces IDENTICAL results to Legacy Mode (backtest_server.py).
+
+This is a VERIFICATION TOOL:
+  1. Configure Legacy mode with your desired settings
+  2. Run Legacy backtest, note results
+  3. Switch to Strategy mode, select LegacyReplicator
+  4. Set same parameters
+  5. Results MUST match exactly
+
+If they don't match → there's a bug in the engine.
+
+Uses engine-computed SL/TP (Phase 3) so the engine computes
+SL/TP at fill time from next bar's open — exactly matching Legacy.
+
+Uses engine-level MA cross exits (Phase 4) so the engine checks
+MA crosses on each bar — exactly matching Legacy timing.
+
+Signal logic replicates Legacy's:
+  - above_all_mas: 2-bar confirmation + regime tracking
+  - ma_cross: fast/slow crossover
+  - trend_filter: close vs longest MA crossover
+  - candle direction confirmation
+  - trade gating (one-per-direction lock)
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from backend.strategies.base import BaseStrategy
+
+
+class LegacyReplicator(BaseStrategy):
+    strategy_id = "legacy_replicator"
+    name = "Legacy Replicator (Verification)"
+    description = (
+        "Replicates Legacy Mode (backtest_server.py) exactly. "
+        "Use to verify Strategy Loader produces identical results. "
+        "Set the same MA, SL, TP, gating, and candle confirm "
+        "parameters as Legacy, then compare trade logs."
+    )
+    version = "1.0"
+    min_lookback = 0
+
+    parameters = {
+        "entry_mode": {
+            "type": "enum",
+            "label": "Entry Mode",
+            "options": ["above_all_mas", "ma_cross", "trend_filter"],
+            "default": "above_all_mas",
+            "help": "Must match Legacy Entry Condition dropdown.",
+        },
+        "ma1_type": {
+            "type": "enum",
+            "label": "MA 1 Type",
+            "options": ["HMA", "EMA", "SMA", "WMA"],
+            "default": "HMA",
+        },
+        "ma1_period": {
+            "type": "number",
+            "label": "MA 1 Period",
+            "default": 21,
+            "min": 2,
+            "max": 500,
+            "step": 1,
+        },
+        "ma2_enabled": {
+            "type": "boolean",
+            "label": "Enable MA 2",
+            "default": False,
+            "help": "Enable second MA (required for ma_cross entry mode).",
+        },
+        "ma2_type": {
+            "type": "enum",
+            "label": "MA 2 Type",
+            "options": ["HMA", "EMA", "SMA", "WMA"],
+            "default": "EMA",
+        },
+        "ma2_period": {
+            "type": "number",
+            "label": "MA 2 Period",
+            "default": 55,
+            "min": 2,
+            "max": 500,
+            "step": 1,
+        },
+        "require_candle_confirm": {
+            "type": "boolean",
+            "label": "Require Candle Direction",
+            "default": True,
+            "help": "Entry candle must match trade direction (Legacy default: ON).",
+        },
+        "sl_mode": {
+            "type": "enum",
+            "label": "SL Mode",
+            "options": ["fixed", "ma_snapshot", "ma_cross"],
+            "default": "fixed",
+        },
+        "sl_fixed_pts": {
+            "type": "number",
+            "label": "SL Fixed Points",
+            "default": 8,
+            "min": 0.25,
+            "step": 0.25,
+            "help": "Only used when SL Mode = fixed.",
+        },
+        "sl_ma_type": {
+            "type": "enum",
+            "label": "SL MA Type",
+            "options": ["EMA", "HMA", "SMA", "WMA"],
+            "default": "EMA",
+            "help": "Only used when SL Mode = ma_snapshot or ma_cross.",
+        },
+        "sl_ma_period": {
+            "type": "number",
+            "label": "SL MA Period",
+            "default": 50,
+            "min": 2,
+            "max": 500,
+            "step": 1,
+        },
+        "tp_mode": {
+            "type": "enum",
+            "label": "TP Mode",
+            "options": ["r_multiple", "ma_cross"],
+            "default": "r_multiple",
+        },
+        "tp_r": {
+            "type": "number",
+            "label": "R Multiple",
+            "default": 2,
+            "min": 0.5,
+            "max": 20,
+            "step": 0.5,
+            "help": "Only used when TP Mode = r_multiple.",
+        },
+        "tp_ma_type": {
+            "type": "enum",
+            "label": "TP MA Type",
+            "options": ["EMA", "HMA", "SMA", "WMA"],
+            "default": "EMA",
+            "help": "Only used when TP Mode = ma_cross.",
+        },
+        "tp_ma_period": {
+            "type": "number",
+            "label": "TP MA Period",
+            "default": 9,
+            "min": 2,
+            "max": 500,
+            "step": 1,
+        },
+        "gating_enabled": {
+            "type": "boolean",
+            "label": "Trade Gating",
+            "default": False,
+            "help": "Lock direction until price crosses gating MA.",
+        },
+        "gating_ma_type": {
+            "type": "enum",
+            "label": "Gating MA Type",
+            "options": ["HMA", "EMA", "SMA", "WMA"],
+            "default": "HMA",
+        },
+        "gating_ma_period": {
+            "type": "number",
+            "label": "Gating MA Period",
+            "default": 21,
+            "min": 2,
+            "max": 500,
+            "step": 1,
+        },
+    }
+
+    # ==========================================================
+    # INDICATORS — tell engine what to precompute
+    # ==========================================================
+    def build_indicators(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        specs = []
+
+        # Entry MA 1 (always)
+        specs.append({
+            "key": "ma1",
+            "kind": params["ma1_type"],
+            "period": int(params["ma1_period"]),
+            "source": "close",
+        })
+
+        # Entry MA 2 (optional)
+        if params.get("ma2_enabled", False):
+            specs.append({
+                "key": "ma2",
+                "kind": params["ma2_type"],
+                "period": int(params["ma2_period"]),
+                "source": "close",
+            })
+
+        # SL MA (for ma_snapshot and ma_cross modes)
+        if params["sl_mode"] in ("ma_snapshot", "ma_cross"):
+            specs.append({
+                "key": "sl_ma",
+                "kind": params["sl_ma_type"],
+                "period": int(params["sl_ma_period"]),
+                "source": "close",
+            })
+
+        # TP MA (for ma_cross mode)
+        if params["tp_mode"] == "ma_cross":
+            specs.append({
+                "key": "tp_ma",
+                "kind": params["tp_ma_type"],
+                "period": int(params["tp_ma_period"]),
+                "source": "close",
+            })
+
+        # Gating MA
+        if params.get("gating_enabled", False):
+            specs.append({
+                "key": "gating_ma",
+                "kind": params["gating_ma_type"],
+                "period": int(params["gating_ma_period"]),
+                "source": "close",
+            })
+
+        return specs
+
+    # ==========================================================
+    # INIT — set up legacy state tracking
+    # ==========================================================
+    def on_init(self, ctx: Any) -> None:
+        s = ctx.state
+        # 2-bar confirmation counters (above_all_mas mode)
+        s["bc"] = 0
+        s["bc2"] = 0
+        # Regime tracking: "neutral" | "above" | "below"
+        s["regime"] = "neutral"
+        # Gating locks
+        s["long_locked"] = False
+        s["short_locked"] = False
+
+    # ==========================================================
+    # MAIN SIGNAL LOGIC — legacy-exact replication
+    # ==========================================================
+    def on_bar(self, ctx: Any) -> Optional[Dict[str, Any]]:
+        p = ctx.params
+        s = ctx.state
+        ind = ctx.indicators
+        bar = ctx.bar
+        i = ctx.index
+
+        c = float(bar["close"])
+        o = float(bar["open"])
+        bull = c > o
+        bear = c < o
+
+        # ── Gather entry MA values ───────────────────────────
+        ma_vals = []
+        ma1 = ind.get("ma1")
+        if ma1 is not None:
+            ma_vals.append(ma1)
+
+        ma2 = None
+        if p.get("ma2_enabled", False):
+            ma2 = ind.get("ma2")
+            if ma2 is not None:
+                ma_vals.append(ma2)
+
+        sl_ma_val = ind.get("sl_ma")
+        tp_ma_val = ind.get("tp_ma")
+        gating_val = ind.get("gating_ma")
+
+        # ── Gating unlock (legacy: checked every bar) ────────
+        if p.get("gating_enabled", False) and gating_val is not None:
+            if s["long_locked"] and c < gating_val:
+                s["long_locked"] = False
+            if s["short_locked"] and c > gating_val:
+                s["short_locked"] = False
+
+        # ══════════════════════════════════════════════════════
+        # IN POSITION: check strategy-level exits
+        #
+        # SL/TP hit checking is done by the ENGINE (_check_exit).
+        # We only handle MA CROSS exits here, because Legacy's
+        # engine checks MA crosses in _check_exit and the
+        # strategy engine also checks them via engine_sl_ma_key /
+        # engine_tp_ma_key stored on the trade.
+        #
+        # HOWEVER: for MA cross SL/TP, we ALSO set engine keys
+        # at entry time, so the engine handles it automatically.
+        # This means we can just HOLD here — the engine does
+        # the MA cross exit check for us.
+        #
+        # The only case we need strategy-level CLOSE is if we
+        # want to exit for a reason the engine doesn't know about.
+        # For Legacy replication, the engine handles everything.
+        # ══════════════════════════════════════════════════════
+        if ctx.position.has_position:
+            # Nothing to do — engine handles SL/TP hit + MA cross exits
+            return {"signal": "HOLD"}
+
+        # ══════════════════════════════════════════════════════
+        # FLAT: signal generation (legacy-exact)
+        # ══════════════════════════════════════════════════════
+
+        # Skip if any entry MA not ready
+        if not ma_vals or any(v is None for v in ma_vals):
+            s["bc"] = 0
+            s["bc2"] = 0
+            return None
+
+        ab = all(c > v for v in ma_vals)  # close above ALL MAs
+        bl = all(c < v for v in ma_vals)  # close below ALL MAs
+
+        # ── Regime tracking (legacy-exact) ────────────────────
+        if s["regime"] == "above" and not ab:
+            s["regime"] = "neutral"
+            s["bc"] = 0
+        elif s["regime"] == "below" and not bl:
+            s["regime"] = "neutral"
+            s["bc2"] = 0
+
+        sig = None
+        entry_mode = p["entry_mode"]
+
+        # ── above_all_mas: 2-bar confirmation ─────────────────
+        if entry_mode == "above_all_mas":
+            # Long signal
+            if s["regime"] != "below":
+                if ab and bull:
+                    s["bc"] += 1
+                else:
+                    s["bc"] = 0
+                if s["bc"] >= 2:
+                    sig = "BUY"
+                    s["regime"] = "above"
+                    s["bc"] = 0
+
+            # Short signal (only if no long signal fired)
+            if sig is None and s["regime"] != "above":
+                if bl and bear:
+                    s["bc2"] += 1
+                else:
+                    s["bc2"] = 0
+                if s["bc2"] >= 2:
+                    sig = "SELL"
+                    s["regime"] = "below"
+                    s["bc2"] = 0
+
+        # ── ma_cross: fast/slow crossover ─────────────────────
+        elif entry_mode == "ma_cross" and len(ma_vals) >= 2 and i > 0:
+            prev_ma1 = None
+            prev_ma2 = None
+            ma1_series = ctx.ind_series.get("ma1")
+            ma2_series = ctx.ind_series.get("ma2")
+            if ma1_series and i - 1 < len(ma1_series):
+                prev_ma1 = ma1_series[i - 1]
+            if ma2_series and i - 1 < len(ma2_series):
+                prev_ma2 = ma2_series[i - 1]
+
+            if None not in (ma1, ma2, prev_ma1, prev_ma2):
+                if prev_ma1 <= prev_ma2 and ma1 > ma2:
+                    sig = "BUY"
+                elif prev_ma1 >= prev_ma2 and ma1 < ma2:
+                    sig = "SELL"
+
+        # ── trend_filter: close vs longest MA crossover ───────
+        elif entry_mode == "trend_filter" and i > 0:
+            # Longest MA = last in ma_vals list
+            # Legacy uses mv[-1] which is the last MA
+            longest_key = "ma2" if p.get("ma2_enabled", False) else "ma1"
+            lm = ma_vals[-1]  # current bar's longest MA
+
+            longest_series = ctx.ind_series.get(longest_key)
+            prev_lm = None
+            if longest_series and i - 1 < len(longest_series):
+                prev_lm = longest_series[i - 1]
+
+            prev_c = float(ctx.bars[i - 1]["close"]) if i > 0 else c
+
+            if lm is not None and prev_lm is not None:
+                if prev_c <= prev_lm and c > lm and bull:
+                    sig = "BUY"
+                elif prev_c >= prev_lm and c < lm and bear:
+                    sig = "SELL"
+
+        # ── Candle direction confirmation (legacy-exact) ──────
+        if p.get("require_candle_confirm", True):
+            if sig == "BUY" and not bull:
+                sig = None
+            if sig == "SELL" and not bear:
+                sig = None
+
+        # ── Gating filter (legacy-exact) ──────────────────────
+        if sig == "BUY" and p.get("gating_enabled", False) and s["long_locked"]:
+            sig = None
+        if sig == "SELL" and p.get("gating_enabled", False) and s["short_locked"]:
+            sig = None
+
+        # ── No signal ────────────────────────────────────────
+        if sig is None:
+            return None
+
+        # ══════════════════════════════════════════════════════
+        # BUILD SIGNAL with engine-computed SL/TP
+        #
+        # The strategy tells the ENGINE how to compute SL/TP
+        # at fill time (next bar's open). This matches Legacy
+        # exactly because Legacy also computes SL/TP at fill.
+        # ══════════════════════════════════════════════════════
+        result = {"signal": sig}
+
+        # ── SL ────────────────────────────────────────────────
+        sl_mode = p["sl_mode"]
+
+        if sl_mode == "fixed":
+            result["sl_mode"] = "fixed"
+            result["sl_pts"] = float(p.get("sl_fixed_pts", 8))
+
+        elif sl_mode == "ma_snapshot":
+            # Legacy uses prev_sl_ma_val which = signal bar's SL MA
+            # That's the current bar's SL MA value (we're on the signal bar)
+            if sl_ma_val is not None:
+                result["sl_mode"] = "ma_snapshot"
+                result["sl_ma_val"] = sl_ma_val
+            else:
+                # No SL MA available — skip this trade
+                # (Legacy would also skip: risk=None → valid_entry=False)
+                return None
+
+        elif sl_mode == "ma_cross":
+            # MA cross SL: use MA snapshot for initial risk calculation,
+            # AND tell engine to check MA cross on each bar for exit
+            if sl_ma_val is not None:
+                result["sl_mode"] = "ma_snapshot"
+                result["sl_ma_val"] = sl_ma_val
+                # Engine will check this MA series each bar for cross exit
+                result["engine_sl_ma_key"] = "sl_ma"
+            else:
+                return None
+
+        # ── TP ────────────────────────────────────────────────
+        tp_mode = p["tp_mode"]
+
+        if tp_mode == "r_multiple":
+            result["tp_mode"] = "r_multiple"
+            result["tp_r"] = float(p.get("tp_r", 2))
+
+        elif tp_mode == "ma_cross":
+            # No fixed TP level — engine checks MA cross for exit
+            result["engine_tp_ma_key"] = "tp_ma"
+
+        # ── Gating: set lock after trade opens ────────────────
+        # Legacy locks direction AFTER trade closes, not opens.
+        # The engine doesn't have gating — we handle it in on_bar.
+        # We just need to set the lock when we know a trade closed.
+        #
+        # But wait — we can't set the lock here because the trade
+        # hasn't happened yet (it's a pending signal). We need to
+        # check in the NEXT on_bar call whether our last trade
+        # was a win/loss and set the lock.
+        #
+        # Actually, Legacy sets the lock unconditionally after ANY
+        # trade close in the direction. Let's check ctx.trades to
+        # see if the last trade closed and lock accordingly.
+        self._update_gating_locks(ctx)
+
+        return result
+
+    # ==========================================================
+    # GATING LOCK MANAGEMENT
+    # ==========================================================
+    def _update_gating_locks(self, ctx: Any) -> None:
+        """
+        Legacy sets gating lock after EVERY trade close.
+        We check if a new trade appeared in ctx.trades since last check.
+        """
+        if not ctx.params.get("gating_enabled", False):
+            return
+
+        s = ctx.state
+        trades = ctx.trades
+        last_checked = s.get("_gating_last_trade_count", 0)
+
+        if len(trades) > last_checked:
+            # New trades closed since last check
+            for t in trades[last_checked:]:
+                if t["direction"] == "long":
+                    s["long_locked"] = True
+                elif t["direction"] == "short":
+                    s["short_locked"] = True
+
+        s["_gating_last_trade_count"] = len(trades)
+```
+
+---
+
+## FILE: `js/backtest.js`
+
+```javascript
 /* ═══════════════════════════════════════════════════════════════════
  backtest.js — Full visualization dashboard
  Pure Canvas 2D — zero external chart dependencies
@@ -1823,3 +2870,4 @@
     } catch (err) { window.btShowRunnerError(err.message || String(err)); }
   };
 })();
+```

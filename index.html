@@ -29,18 +29,21 @@
 
     <div class="header-right" id="chartHeaderRight">
       <div class="ticker-info">
-        <span class="ticker-symbol" id="tickerSymbol">NQ</span>
+        <select class="symbol-select" id="chartSymbol">
+          <option value="NQ" selected>NQ</option>
+          <option value="SPX">SPX</option>
+          <option value="XAUUSD">XAUUSD</option>
+          <option value="EURUSD">EURUSD</option>
+          <option value="USDJPY">USDJPY</option>
+          <option value="GBPUSD">GBPUSD</option>
+          <option value="AUDUSD">AUDUSD</option>
+          <option value="USDCAD">USDCAD</option>
+        </select>
         <span class="ticker-price" id="tickerPrice">—</span>
         <span class="ticker-change" id="tickerChange">—</span>
       </div>
 
-      <div class="interval-group">
-        <button class="interval-btn active">2PT</button>
-        <button class="interval-btn">4PT</button>
-        <button class="interval-btn">6PT</button>
-        <button class="interval-btn">8PT</button>
-        <button class="interval-btn">10PT</button>
-      </div>
+      <div class="interval-group" id="intervalGroup"></div>
 
       <div class="status-dot-wrap">
         <span class="status-dot"></span>
@@ -104,10 +107,16 @@
             </select>
           </div>
           <div class="bt-field">
-            <label class="bt-label">Point Value ($/pt/lot)</label>
+            <label class="bt-label">Point Value</label>
             <input class="bt-input" type="number" id="bt_pointValue"
                   value="1" min="0.01" max="10000" step="0.01"/>
-            <span class="bt-hint" id="bt_pvHint">1 pt × 1 lot = $1.00</span>
+            <span class="bt-hint" id="bt_pvHint">Instrument tick multiplier (usually 1)</span>
+          </div>
+          <div class="bt-field">
+            <label class="bt-label">Dollar Per Point (per lot)</label>
+            <input class="bt-input" type="number" id="bt_dollarPerPoint"
+                  value="1" min="0.0001" max="1000000" step="0.01"/>
+            <div class="bt-toggle-label" id="bt_dppHint">1pt move × 1.00 lot = $1.00 P&L</div>
           </div>
           <div class="bt-toggle-label">
             Manual Mode keeps your existing legacy controls. Load Strategy Mode auto-loads Python strategy schemas + engine settings.
@@ -119,16 +128,22 @@
           <div class="bt-section-title">DATA SOURCE</div>
 
           <div class="bt-field">
-            <label class="bt-label">Range Bar Size</label>
-            <select class="bt-select" id="bt_range">
-              <option value="2" selected>2 pt</option><option value="4">4 pt</option>
-              <option value="6">6 pt</option><option value="8">8 pt</option>
-              <option value="10">10 pt</option><option value="15">15 pt</option>
-              <option value="20">20 pt</option><option value="25">25 pt</option>
-              <option value="30">30 pt</option><option value="35">35 pt</option>
-              <option value="40">40 pt</option><option value="45">45 pt</option>
-              <option value="50">50 pt</option>
+            <label class="bt-label">Symbol</label>
+            <select class="bt-select" id="bt_symbol">
+              <option value="NQ" selected>NQ</option>
+              <option value="SPX">SPX</option>
+              <option value="XAUUSD">XAUUSD</option>
+              <option value="EURUSD">EURUSD</option>
+              <option value="USDJPY">USDJPY</option>
+              <option value="GBPUSD">GBPUSD</option>
+              <option value="AUDUSD">AUDUSD</option>
+              <option value="USDCAD">USDCAD</option>
             </select>
+          </div>
+
+          <div class="bt-field">
+            <label class="bt-label">Range Bar Size</label>
+            <select class="bt-select" id="bt_range"></select>
           </div>
 
           <div class="bt-field">
@@ -173,6 +188,7 @@
             <select class="bt-select" id="bt_sizingMode">
               <option value="fixed" selected>Fixed Lot</option>
               <option value="risk_pct">Risk %</option>
+              <option value="risk_per_trade">Risk Per Trade</option>
             </select>
           </div>
 
@@ -190,6 +206,37 @@
               <input class="bt-input" type="number" id="bt_riskPct" value="1.0" min="0.01" max="100" step="0.1"/>
               <div class="bt-toggle-label" id="bt_riskHint">
                 $1,000 balance × 1% = $10 risk per trade
+              </div>
+            </div>
+          </div>
+          <div id="bt_riskPerTradeWrap" style="display:none;">
+            <div class="bt-field">
+              <label class="bt-label">Base Risk ($)</label>
+              <input class="bt-input" type="number" id="bt_fixedRisk" value="10" min="0.01" step="0.5"/>
+              <div class="bt-toggle-label" id="bt_fixedRiskHint">
+                Every trade risks exactly $10.00 (requires SL)
+              </div>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">Scaling Mode</label>
+              <div class="bt-toggle-row">
+                <label class="bt-toggle"><input type="checkbox" id="bt_scalingEnabled"/><span class="bt-toggle-slider"></span></label>
+                <span class="bt-toggle-label">Scale risk with equity growth</span>
+              </div>
+            </div>
+
+            <div id="bt_scalingWrap" style="display:none;">
+              <div class="bt-field">
+                <label class="bt-label">For Every ($)</label>
+                <input class="bt-input" type="number" id="bt_scalingPer" value="100" min="1" step="10"/>
+              </div>
+              <div class="bt-field">
+                <label class="bt-label">Risk ($)</label>
+                <input class="bt-input" type="number" id="bt_scalingRisk" value="1" min="0.01" step="0.25"/>
+              </div>
+              <div class="bt-toggle-label" id="bt_scalingHint">
+                $10,000 bal ÷ $100 × $1.00 = $100.00 risk/trade
               </div>
             </div>
           </div>
@@ -339,17 +386,11 @@
         <div class="bt-section">
           <div class="bt-section-title">COMMISSION</div>
           <div class="bt-field">
-            <label class="bt-label">Commission Type</label>
-            <div class="bt-radio-group">
-              <label class="bt-radio"><input type="radio" name="comm_type" value="flat" checked/><span>Flat/trade</span></label>
-              <label class="bt-radio"><input type="radio" name="comm_type" value="per_contract"/><span>Per contract</span></label>
-              <label class="bt-radio"><input type="radio" name="comm_type" value="per_side"/><span>Per side</span></label>
+            <label class="bt-label">Commission Per Lot ($)</label>
+            <input class="bt-input" type="number" id="bt_commPerLot" value="1.25" min="0" step="0.25"/>
+            <div class="bt-toggle-label" id="bt_commHint">
+              1.00 lot × $1.25 = $1.25 commission/trade
             </div>
-          </div>
-
-          <div class="bt-field">
-            <label class="bt-label">Amount ($)</label>
-            <input class="bt-input" type="number" id="bt_commission" value="4.00" min="0" step="0.5"/>
           </div>
         </div>
         <!-- SPREAD SIMULATION -->
@@ -362,7 +403,26 @@
               <span class="bt-toggle-label">Apply random spread per trade (realistic slippage)</span>
             </div>
           </div>
-          <!-- ═══ CURRENCY DISPLAY (display-only) ═══ -->
+
+          <div id="bt_spreadWrap" style="display:none;">
+            <div class="bt-field">
+              <label class="bt-label">Min Spread ($)</label>
+              <input class="bt-input" type="number" id="bt_spreadMin" value="0.10" min="0" step="0.01"/>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">Max Spread ($)</label>
+              <input class="bt-input" type="number" id="bt_spreadMax" value="0.50" min="0" step="0.01"/>
+            </div>
+
+            <div class="bt-field">
+              <label class="bt-label">Seed (0 = random)</label>
+              <input class="bt-input" type="number" id="bt_spreadSeed" value="0" min="0" step="1"/>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══ CURRENCY DISPLAY (display-only) ═══ -->
         <div class="bt-section" id="cc_section_manual">
           <div class="bt-section-title">CURRENCY DISPLAY</div>
 
@@ -377,7 +437,7 @@
 
           <div id="cc_panel" style="display:none;flex-direction:column;gap:8px;">
             <div class="bt-field">
-              <label class="bt-label">Symbol</label>
+              <label class="bt-label">Currency Symbol</label>
               <select id="cc_symbol" class="bt-select">
                 <option value="$" selected>$</option>
                 <option value="¥">¥</option>
@@ -401,23 +461,6 @@
           </div>
         </div>
 
-          <div id="bt_spreadWrap" style="display:none;">
-            <div class="bt-field">
-              <label class="bt-label">Min Spread ($)</label>
-              <input class="bt-input" type="number" id="bt_spreadMin" value="0.10" min="0" step="0.01"/>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">Max Spread ($)</label>
-              <input class="bt-input" type="number" id="bt_spreadMax" value="0.50" min="0" step="0.01"/>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">Seed (0 = random)</label>
-              <input class="bt-input" type="number" id="bt_spreadSeed" value="0" min="0" step="1"/>
-            </div>
-          </div>
-        </div>
         <!-- STRATEGY MODE ONLY -->
         <div id="bt_strategyPanel" style="display:none;">
           <div class="bt-section">

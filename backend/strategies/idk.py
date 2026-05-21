@@ -8,30 +8,13 @@ ENTRY
   SELL: N consecutive bear candles (close < open) → enter next bar open
 
 STOP LOSS
-  BUY:  Last (Nth) bull candle's LOW
-  SELL: Last (Nth) bear candle's HIGH
-  (absolute SL — engine computes risk from fill price)
+  BUY:  Last (Nth) bull candle's BODY LOW (min(open, close))
+  SELL: Last (Nth) bear candle's BODY HIGH (max(open, close))
 
 TAKE PROFIT
   R-multiple of risk (configurable, default 1R)
-  (engine computes at fill time)
-
-NO CANDLE REUSE (toggleable)
-  When ON: candles used for signal confirmation AND candles during
-  the trade CANNOT be reused for the next signal. After a trade
-  closes, counting starts completely fresh.
-
-  Example (confirm_bars=2):
-    Bar 1: bull (count=1)
-    Bar 2: bull (count=2) → BUY signal fires
-    Bar 3: trade opens at open, TP hit → trade closes
-    Bars 1, 2, 3 are ALL used → next count starts from bar 4
-
-  When OFF: only the signal resets the counter. The exit bar
-  itself CAN be counted toward the next signal.
-
-No indicators required — pure candle structure.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -45,11 +28,11 @@ class JinniContinuum(BaseStrategy):
     name = "Jinni Continuum"
     description = (
         "Momentum continuation: N consecutive bull/bear candles → "
-        "entry at next bar open, SL at last candle's low/high, "
+        "entry at next bar close, SL at last candle's body, "
         "TP at configurable R-multiple. Optional candle reuse prevention."
     )
-    version = "1.0.0"
-    min_lookback = 0  # no indicators, pure price action
+    version = "1.2.0"
+    min_lookback = 0
 
     # ==========================================================
     # PARAMETERS
@@ -97,11 +80,11 @@ class JinniContinuum(BaseStrategy):
         s = ctx.state
         s["bull_count"] = 0
         s["bear_count"] = 0
-        s["last_used_bar"] = -1        # last bar index consumed by signal/trade
-        s["_last_trade_count"] = 0     # for detecting new trade closes
+        s["last_used_bar"] = -1
+        s["_last_trade_count"] = 0
 
     # ==========================================================
-    # ON BAR
+    # ON BAR — signal generation only
     # ==========================================================
     def on_bar(self, ctx: Any) -> Optional[Dict[str, Any]]:
         s = ctx.state
@@ -111,8 +94,6 @@ class JinniContinuum(BaseStrategy):
 
         c = float(bar["close"])
         o = float(bar["open"])
-        h = float(bar["high"])
-        l = float(bar["low"])
 
         bull = c > o
         bear = c < o
@@ -123,10 +104,6 @@ class JinniContinuum(BaseStrategy):
 
         # ══════════════════════════════════════════════════════
         # UPDATE LAST USED BAR FROM CLOSED TRADES
-        #
-        # If a trade closed since last check, mark the exit bar
-        # as the last used bar (prevents reuse of exit bar and
-        # all bars before it that were part of the trade).
         # ══════════════════════════════════════════════════════
         if no_reuse:
             trades = ctx.trades
@@ -135,23 +112,18 @@ class JinniContinuum(BaseStrategy):
                 last_trade = trades[-1]
                 exit_bar = last_trade.get("exit_bar", i)
                 s["last_used_bar"] = exit_bar
-                # Reset counters — fresh start after trade
                 s["bull_count"] = 0
                 s["bear_count"] = 0
             s["_last_trade_count"] = len(trades)
 
         # ══════════════════════════════════════════════════════
         # IN POSITION → HOLD
-        # Engine handles SL/TP exits.
         # ══════════════════════════════════════════════════════
         if ctx.position.has_position:
             return {"signal": "HOLD"}
 
         # ══════════════════════════════════════════════════════
         # CANDLE REUSE CHECK
-        #
-        # If no_reuse is ON and this bar is at or before the
-        # last used bar, skip it entirely.
         # ══════════════════════════════════════════════════════
         if no_reuse and i <= s.get("last_used_bar", -1):
             s["bull_count"] = 0
@@ -160,10 +132,6 @@ class JinniContinuum(BaseStrategy):
 
         # ══════════════════════════════════════════════════════
         # COUNT CONSECUTIVE CANDLES
-        #
-        # Bull: close > open → increment bull, reset bear
-        # Bear: close < open → increment bear, reset bull
-        # Doji: close == open → reset both (not directional)
         # ══════════════════════════════════════════════════════
         if bull:
             s["bull_count"] = s.get("bull_count", 0) + 1
@@ -172,7 +140,6 @@ class JinniContinuum(BaseStrategy):
             s["bear_count"] = s.get("bear_count", 0) + 1
             s["bull_count"] = 0
         else:
-            # Doji — breaks the streak
             s["bull_count"] = 0
             s["bear_count"] = 0
             return None
@@ -183,29 +150,23 @@ class JinniContinuum(BaseStrategy):
         sig = None
         sl_price = None
 
-        # ── BUY: N consecutive bull candles ───────────────────
         if s["bull_count"] >= confirm_bars:
             sig = "BUY"
-            sl_price = l  # last bull candle's low
+            sl_price = min(o, c)   # BODY LOW
 
-            # Reset counters
             s["bull_count"] = 0
             s["bear_count"] = 0
 
-            # Mark signal bar as used
             if no_reuse:
                 s["last_used_bar"] = i
 
-        # ── SELL: N consecutive bear candles ──────────────────
         elif s["bear_count"] >= confirm_bars:
             sig = "SELL"
-            sl_price = h  # last bear candle's high
+            sl_price = max(o, c)   # BODY HIGH
 
-            # Reset counters
             s["bull_count"] = 0
             s["bear_count"] = 0
 
-            # Mark signal bar as used
             if no_reuse:
                 s["last_used_bar"] = i
 
@@ -214,16 +175,6 @@ class JinniContinuum(BaseStrategy):
 
         # ══════════════════════════════════════════════════════
         # BUILD SIGNAL
-        #
-        # SL: absolute price (candle low/high)
-        # TP: engine-computed R-multiple at fill time
-        #
-        # Engine flow at next bar open:
-        #   1. entry_price = next bar open
-        #   2. risk = abs(entry_price - sl_price)
-        #   3. tp = entry_price + risk * R  (long)
-        #        or entry_price - risk * R  (short)
-        #   4. spread applied to all three
         # ══════════════════════════════════════════════════════
         return {
             "signal": sig,

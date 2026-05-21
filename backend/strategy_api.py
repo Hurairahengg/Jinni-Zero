@@ -32,8 +32,8 @@ def _parse_datetime_param(val):
     return None
 
 
-def load_bars(range_pt, bar_range, start_date=None, end_date=None):
-    path = os.path.join(DATA_DIR, f"{int(range_pt)}pt.json")
+def load_bars(range_pt, bar_range, symbol="NQ", start_date=None, end_date=None):
+    path = os.path.join(DATA_DIR, symbol, f"{int(range_pt)}pt.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Dataset not found: {path}")
     with open(path, "r", encoding="utf-8") as f:
@@ -77,6 +77,7 @@ def _setup_engine(payload):
     bars = load_bars(
         range_pt=int(payload.get("range", 10)),
         bar_range=int(payload.get("bar_range", 1000)),
+        symbol=payload.get("symbol", "NQ"),
         start_date=payload.get("start_date"),
         end_date=payload.get("end_date"),
     )

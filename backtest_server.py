@@ -8,7 +8,12 @@ GET  /api/health          →  ok
 import json, math, os, time as _time
 from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
-from backend.dollar_math import points_to_dollars, finalize_trade_pnl
+from backend.dollar_math import (
+    points_to_dollars,
+    finalize_trade_pnl,
+    compute_position_size,
+    compute_scaling_risk,
+)
 from backend.strategy_api import strategy_api
 from backend.stats_engine import compute_all_stats, downsample_curve as ds_curve
 from backend.shared import (
@@ -48,8 +53,10 @@ def _parse_datetime_param(val):
 # ════════════════════════════════════════════════════════════════════
 #  DATA
 # ════════════════════════════════════════════════════════════════════
-def load_bars(range_pt, bar_range, start_date=None, end_date=None):
-    path = os.path.join(DATA_DIR, f"{range_pt}pt.json")
+def load_bars(range_pt, bar_range, symbol="NQ", start_date=None, end_date=None):
+    range_val = float(range_pt)
+    range_str = str(int(range_val)) if range_val == int(range_val) else str(range_val)
+    path = os.path.join(DATA_DIR, symbol, f"{range_str}pt.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Dataset not found: {path}")
     with open(path) as f:
@@ -172,10 +179,11 @@ class BacktestEngine:
         self.entry_mode    = config.get("entry", "above_all_mas")
         self.sl_cfg        = config.get("sl", {})
         self.tp_cfg        = config.get("tp", {})
-        self.comm_cfg      = config.get("commission", {})
+        self.commission_per_lot = float(config.get("commission_per_lot", 0))
         self.gating_cfg    = config.get("gating", {})
         self.lot_size      = float(config.get("lot_size", 1.0))
         self.point_value   = float(config.get("point_value", 1.0))
+        self.dollar_per_point = float(config.get("dollar_per_point", 1.0))
         self.starting_cap  = float(config.get("starting_capital", 10000.0))
         self.ambiguous_mode = config.get("ambiguous_bar_mode", "conservative")
         self.require_candle_confirm = config.get("require_candle_confirm", True)
@@ -187,8 +195,15 @@ class BacktestEngine:
         self.spread_gen = SpreadGenerator(config.get("spread", {}))
 
         # ── Position sizing ──────────────────────────────────────
-        self.sizing_mode = str(config.get("sizing_mode", "fixed")).lower()
+        self.sizing_mode = str(config.get("sizing_mode", "fixed")).strip().lower()
         self.risk_pct = float(config.get("risk_pct", 1.0))
+        self.fixed_risk = float(config.get("fixed_risk", 10.0))
+        self.scaling_enabled = bool(config.get("scaling_enabled", False))
+        self.scaling_per = float(config.get("scaling_per", 100.0))
+        self.scaling_risk = float(config.get("scaling_risk", 1.0))
+        self.min_lot = float(config.get("min_lot", 0.01))
+        self.max_lot = float(config.get("max_lot", 1000.0))
+        self.lot_step = float(config.get("lot_step", 0.01))
 
         self.entry_ind = MultiIndicatorEngine(self.ma_defs)
 
@@ -274,8 +289,8 @@ class BacktestEngine:
 
             just_entered = False
             if pending_signal is not None and state == "flat":
-                direction = pending_signal
-                ep = o
+                direction = pending_signal["direction"]
+                ep = pending_signal.get("entry_price", o)
 
                 sl_level, risk_pts = self._compute_sl(direction, ep, prev_sl_ma_val)
                 tp_level = self._compute_tp(direction, ep, risk_pts)
@@ -302,29 +317,57 @@ class BacktestEngine:
                     if direction == "short" and tp_level >= ep:
                         valid_entry = False
 
-                # ── Dynamic position sizing ──────────────────────
-                if valid_entry and self.sizing_mode == "risk_pct":
+                # ── Dynamic position sizing (centralized) ────────
+                trade_lot = self.lot_size
+                if valid_entry and self.sizing_mode in ("risk_pct", "risk_per_trade"):
                     if risk_pts is None or risk_pts <= 0:
                         valid_entry = False
                     else:
                         balance_now = self.starting_cap + cum
-                        risk_amount = balance_now * (self.risk_pct / 100.0)
-                        trade_lot = risk_amount / (risk_pts * self.point_value)
-                        trade_lot = max(0.01, round(trade_lot, 2))
+
+                        # ── Determine risk amount ────────────────
+                        risk_amount = 0.0
+                        if self.sizing_mode == "risk_pct":
+                            risk_amount = balance_now * (self.risk_pct / 100.0)
+                        elif self.scaling_enabled:
+                            risk_amount, sc_log = compute_scaling_risk(
+                                balance_now, self.scaling_per, self.scaling_risk)
+                            if len(self.trades) < 5:
+                                print(f"  {sc_log}")
+                        else:
+                            risk_amount = self.fixed_risk
+
+                        # ── Compute lot size ─────────────────────
+                        if risk_amount <= 0:
+                            valid_entry = False
+                        else:
+                            trade_lot, sz_log, sz_ok = compute_position_size(
+                                risk_amount, risk_pts, self.point_value,
+                                self.min_lot, self.max_lot, self.lot_step,
+                                self.commission_per_lot, self.dollar_per_point,
+                            )
+                            if len(self.trades) < 5:
+                                print(f"  {sz_log}")
+                            if not sz_ok or trade_lot is None:
+                                valid_entry = False
                 else:
                     trade_lot = self.lot_size
 
                 if valid_entry:
                     open_t = dict(
                         id=len(self.trades)+1, direction=direction,
-                        entry_bar=i, entry_time=bar["time"], entry_price=round(ep, 4),
+                        entry_bar=pending_signal.get("signal_bar", i),
+                        entry_time=pending_signal.get("signal_time", bar["time"]),
+                        entry_price=round(ep, 4),
                         sl_level=sl_level, tp_level=tp_level,
-                        risk_pts=risk_pts, mae=0.0, mfe=0.0, bars_held=0,
+                        initial_sl=sl_level, initial_tp=tp_level,
+                        risk_pts=risk_pts, initial_risk_pts=risk_pts,
+                        mae=0.0, mfe=0.0, bars_held=0,
                         spread=round(trade_spread, 4),
                         lot_size=trade_lot,
                     )
                     state = direction
-                    just_entered = True
+                    just_entered = False
 
             pending_signal = None
 
@@ -333,8 +376,12 @@ class BacktestEngine:
                 if closed:
                     trade_spread = closed.get("spread", 0.0)
                     raw_exit = closed["exit_price"]
-                    closed["exit_price"] = round(
-                        self.spread_gen.apply_exit(raw_exit, closed["direction"], trade_spread), 4)
+                    # Only apply exit spread for market-price exits.
+                    # SL_HIT / TP_R exit prices already include spread from entry setup.
+                    exit_reason = closed.get("exit_reason", "")
+                    if exit_reason not in ("SL_HIT", "TP_R"):
+                        closed["exit_price"] = round(
+                            self.spread_gen.apply_exit(raw_exit, closed["direction"], trade_spread), 4)
 
                     self._finalize_trade(closed)
                     cum += closed["net_pnl"]
@@ -378,7 +425,7 @@ class BacktestEngine:
                 pts = (c - open_t["entry_price"]) if state == "long" \
                       else (open_t["entry_price"] - c)
                 t_lot = open_t.get("lot_size", self.lot_size)
-                unrealised = points_to_dollars(pts, t_lot, self.point_value)
+                unrealised = points_to_dollars(pts, t_lot, self.point_value, self.dollar_per_point)
             else:
                 unrealised = 0.0
             eq = self.starting_cap + cum + unrealised
@@ -461,7 +508,12 @@ class BacktestEngine:
             if sig == "short" and self.gating_enabled and short_locked: sig = None
 
             if sig:
-                pending_signal = sig
+                pending_signal = {
+                    "direction": sig,
+                    "entry_price": c,
+                    "signal_bar": i,
+                    "signal_time": bar["time"],
+                }
 
         if state != "flat" and open_t:
             lb = self.bars[-1]; cp = lb["close"]
@@ -476,6 +528,7 @@ class BacktestEngine:
                       "holding_seconds": abs(lb["time"]-open_t["entry_time"]),
                       "bars_held": self.n-1-open_t["entry_bar"]}
             trade_spread = closed.get("spread", 0.0)
+            # end_of_data is a market-price exit, spread applies here
             closed["exit_price"] = round(
                 self.spread_gen.apply_exit(closed["exit_price"], d, trade_spread), 4)
             self._finalize_trade(closed)
@@ -580,12 +633,13 @@ class BacktestEngine:
                 "bars_held": bi - t["entry_bar"]}
 
     def _finalize_trade(self, closed):
-        commission = calc_comm(self.comm_cfg)
+        commission = round(closed.get("lot_size", self.lot_size) * self.commission_per_lot, 5)
         trade_lot = closed.get("lot_size", self.lot_size)
         finalize_trade_pnl(
             closed,
             lot_size=trade_lot,
             point_value=self.point_value,
+            dollar_per_point=self.dollar_per_point,
             commission=commission,
         )
 
@@ -655,8 +709,9 @@ def _validate_and_load(cfg):
     if not mas: raise ValueError("Need at least one MA")
 
     bars = load_bars(
-        int(cfg.get("range",10)),
-        int(cfg.get("bar_range",1000)),
+        float(cfg.get("range", 10)),
+        int(cfg.get("bar_range", 1000)),
+        symbol=cfg.get("symbol", "NQ"),
         start_date=cfg.get("start_date"),
         end_date=cfg.get("end_date"),
     )
@@ -757,6 +812,23 @@ def run_backtest_stream():
             yield json.dumps({"type": "error", "error": str(e)}) + "\n"
     return Response(stream_with_context(generate()), mimetype='application/x-ndjson',
         headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no','Access-Control-Allow-Origin':'*'})
+
+
+@app.route("/api/ranges/<symbol>", methods=["GET"])
+def get_ranges(symbol):
+    folder = os.path.join(DATA_DIR, symbol)
+    if not os.path.isdir(folder):
+        return jsonify([]), 200
+    ranges = []
+    for f in os.listdir(folder):
+        if f.endswith("pt.json"):
+            try:
+                val = float(f.replace("pt.json", ""))
+                ranges.append(val)
+            except ValueError:
+                pass
+    ranges.sort()
+    return jsonify(ranges), 200
 
 
 @app.route("/api/health", methods=["GET"])

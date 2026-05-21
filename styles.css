@@ -931,3 +931,32 @@ html, body {
 #bt_replayMeta {
   margin-left: 4px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SYMBOL SELECT (chart header + backtester)
+   ═══════════════════════════════════════════════════════════════════ */
+.symbol-select {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-family: var(--syne);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 3px 24px 3px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2300e5ff'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  transition: border-color 0.15s;
+}
+.symbol-select:hover { border-color: var(--accent2); }
+.symbol-select:focus { border-color: var(--accent); }
+.symbol-select option {
+  background: var(--bg2);
+  color: var(--text);
+}

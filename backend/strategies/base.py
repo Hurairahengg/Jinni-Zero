@@ -29,7 +29,9 @@ class BaseStrategy(ABC):
     Lifecycle:
         1. Engine calls build_indicators(params) → precomputes indicator series
         2. Engine calls on_init(ctx)             → strategy initializes state
-        3. For each bar: engine calls on_bar(ctx) → strategy returns signal
+        3. For each bar:
+           a. Engine calls on_bar(ctx)           → strategy returns signal
+           b. If in position: engine calls on_manage(ctx) → trade management
         4. Engine calls on_end(ctx)              → strategy cleanup
     """
 
@@ -139,3 +141,35 @@ class BaseStrategy(ABC):
         ❌ NEVER return: size, entry_price, PnL, balance, equity, commission.
         """
         raise NotImplementedError("Strategy must implement on_bar()")
+
+    # ==========================================================
+    # TRADE MANAGEMENT (optional — called every bar while in position)
+    # ==========================================================
+    def on_manage(self, ctx: Any) -> Optional[Dict[str, Any]]:
+        """
+        Called every bar when a position is OPEN, after on_bar.
+        Override to implement trade management (trailing stop, breakeven, etc.)
+
+        ctx.position fields available:
+          .has_position    bool
+          .direction       'long' | 'short'
+          .entry_price     float
+          .entry_bar       int
+          .bars_held       int
+          .sl_level        float | None
+          .tp_level        float | None
+          .unrealized_pts  float
+          .unrealized_pnl  float (dollars)
+          .unrealized_r    float | None (R-multiple of floating PnL)
+          .mae             float (max adverse excursion, points)
+          .mfe             float (max favorable excursion, points)
+
+        Return None or {} for no action, or a dict with any of:
+          {"update_sl": new_sl_price}
+          {"update_tp": new_tp_price}
+          {"close": True, "close_reason": "reason_string"}
+
+        on_bar signals take priority over on_manage if both return updates.
+        Strategies that don't override this get no trade management (default).
+        """
+        return None

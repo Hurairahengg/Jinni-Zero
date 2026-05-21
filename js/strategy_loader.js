@@ -180,6 +180,7 @@
     var payload = {
       strategy_id: STATE.currentStrategyId,
       parameters: collectStrategyParams(),
+      symbol: ($('bt_symbol') || {}).value || 'NQ',
       range: parseInt(($('bt_range') || {}).value || '10', 10),
       bar_range: parseInt(($('bt_barRange') || {}).value || '1000', 10),
       starting_capital: parseFloat(($('bt_startingCapital') || {}).value || '10000'),
@@ -187,10 +188,11 @@
       point_value: parseFloat((document.getElementById('bt_pointValue') || {}).value || '1') || 1.0,
       sizing_mode: ($('bt_sizingMode') || {}).value || 'fixed',
       risk_pct: parseFloat(($('bt_riskPct') || {}).value || '1.0') || 1.0,
-      commission: {
-        type: (document.querySelector('input[name="comm_type"]:checked') || {}).value || 'flat',
-        amount: parseFloat(($('bt_commission') || {}).value || '0'),
-      },
+      fixed_risk: parseFloat(($('bt_fixedRisk') || {}).value || '10') || 10,
+      scaling_enabled: ($('bt_scalingEnabled') || {}).checked || false,
+      scaling_per: parseFloat(($('bt_scalingPer') || {}).value || '100') || 100,
+      scaling_risk: parseFloat(($('bt_scalingRisk') || {}).value || '1') || 1,
+      commission_per_lot: parseFloat(($('bt_commPerLot') || {}).value || '1.25') || 0,
       ambiguous_bar_mode: ($('bt_ambiguousMode') || {}).value || 'conservative',
       spread: {
         enabled: ($('bt_spreadEnabled') || {}).checked || false,
