@@ -2,12 +2,15 @@
    chart.js — JINNI ZERO · NQ Range-Bar Chart + Indicators + Signals
    Lightweight Charts v4.2
 
-   v2 — Full recode of windowing/loading system:
-   - Immediate first render (no blank screen)
-   - Stable scroll loading (no jumping, no loops)
-   - All markers on candleSeries (guaranteed visible)
-   - _isShifting lock prevents feedback loops
-   - Clean module separation
+   v3 — Mega Upgrade:
+   - FIXED ATR pane (Wilder's RMA, dedicated pane, working readouts)
+   - Signal engine v2:
+       * Mode A: "Above/Below MA + N consecutive candles"
+       * Mode B: "MA1 crosses MA2" (bullish/bearish crossover)
+       * Candle direction filter (bull candle only for buy, bear for sell)
+       * ATR-based dynamic SL/TP with custom multipliers
+   - Signal Settings editor (live, no rebuild)
+   - SL/TP shown in marker text + dashed price lines for last signal
 ═══════════════════════════════════════════════════════════════════ */
 (function () {
 
@@ -42,14 +45,17 @@ const INDICATOR_CATALOG = {
     obColor: '#ff3d5a', osColor: '#00e676', midColor: '#4a6070' } },
   'Stoch RSI': { defaults: { length: 14, smoothK: 3, smoothD: 3, color: '#8bc34a',
     source: 'close', obLevel: 80, osLevel: 20, obColor: '#ff3d5a', osColor: '#00e676' } },
+  ATR:  { defaults: { length: 14, color: '#ffab00', source: 'close' } },
 };
 const INDICATOR_TYPES = Object.keys(INDICATOR_CATALOG);
+const MA_TYPES = ['EMA','HMA','SMA','WMA'];
 const PRICE_SOURCES = ['close', 'open', 'high', 'low'];
 
 const DEFAULT_INDICATORS = [
   { type: 'HMA', length: 55, color: '#00e5ff', source: 'close', visible: true },
   { type: 'EMA', length: 55, color: '#ff9800', source: 'close', visible: true },
   { type: 'EMA', length: 200, color: '#e040fb', source: 'close', visible: true },
+  { type: 'ATR', length: 14, color: '#ffab00', source: 'close', visible: true },
 ];
 
 /* ──────────────────────────────────────────────────────────────────
@@ -85,7 +91,7 @@ chartsStack.appendChild(oscillatorWrap);
 const overlayUi = document.createElement('div');
 Object.assign(overlayUi.style, {
   position:'absolute',top:'10px',left:'10px',zIndex:'30',display:'flex',
-  flexDirection:'column',gap:'8px',pointerEvents:'auto',maxWidth:'620px',
+  flexDirection:'column',gap:'8px',pointerEvents:'auto',maxWidth:'640px',
 });
 rootContainer.appendChild(overlayUi);
 
@@ -147,7 +153,6 @@ let lastVisibleRange = null;
 
 let sourceCache = { close:[], open:[], high:[], low:[] };
 
-// ── Anti-loop / shifting lock ────────────────────────────────────
 let _isShifting = false;
 let _shiftQueued = null;
 let _shiftTimer = null;
@@ -157,21 +162,37 @@ let indicatorRenderTimer = null;
 
 let nextIndicatorId = 1;
 let indicators = [];
-let signalEnabled = true;
-let signalIndicatorId = null;
+
+// ── SIGNAL CONFIG (full editor controls these) ──────────────────
+let signalConfig = {
+  enabled: true,
+  mode: 'cross',                 // 'aboveBelow' | 'cross'
+  primaryIndicatorId: null,      // MA A
+  secondaryIndicatorId: null,    // MA B (only for cross)
+  consecutiveBars: 2,            // for aboveBelow mode
+  requireCandleDir: true,        // bull-candle for buy, bear-candle for sell
+  atrIndicatorId: null,          // ATR indicator used for SL/TP
+  slMult: 1.5,                   // SL = entry ∓ slMult * ATR
+  tpMult: 3.0,                   // TP = entry ± tpMult * ATR
+  showSlTpLines: true,           // dashed price lines for last signal
+};
 
 const indicatorSeriesRegistry = new Map();
 const indicatorWindowCache = new Map();
 let lastRenderedIndicatorRawValues = new Map();
 let lastRenderedComputed = new Map();
 
-// ── Markers (all on candleSeries) ────────────────────────────────
 let _signalMarkers = [];
 let _btEntryMarkers = [];
 let _btExitMarkers = [];
 let fullBacktestTrades = [];
 
-const paneState = { rsi: null, stoch: null };
+// SL/TP price lines for last signal
+let _signalSlLine = null;
+let _signalTpLine = null;
+let _signalEntryLine = null;
+
+const paneState = { rsi: null, stoch: null, atr: null };
 let selectedIndicatorId = null;
 
 /* ──────────────────────────────────────────────────────────────────
@@ -195,6 +216,7 @@ function indicatorWarmup(ind) {
   var len = Math.max(1, Number(ind.length) || 1);
   if (ind.type === 'Stoch RSI') return len * 8 + 20;
   if (ind.type === 'RSI') return len * 5 + 10;
+  if (ind.type === 'ATR') return len * 5 + 10;
   if (ind.type === 'BB') return len * 4 + 10;
   return len * 4 + 10;
 }
@@ -258,21 +280,24 @@ function volumeDataForLoadedWindow() {
 
 function updateSidebar(bar) {
   if (!bar) return;
-  document.getElementById('statOpen').textContent = bar.open.toFixed(2);
-  document.getElementById('statHigh').textContent = bar.high.toFixed(2);
-  document.getElementById('statLow').textContent = bar.low.toFixed(2);
-  document.getElementById('statClose').textContent = bar.close.toFixed(2);
-  document.getElementById('statVolume').textContent = bar.volume ? bar.volume.toFixed(0) : '—';
+  var elO=document.getElementById('statOpen'); if (elO) elO.textContent = bar.open.toFixed(2);
+  var elH=document.getElementById('statHigh'); if (elH) elH.textContent = bar.high.toFixed(2);
+  var elL=document.getElementById('statLow');  if (elL) elL.textContent = bar.low.toFixed(2);
+  var elC=document.getElementById('statClose');if (elC) elC.textContent = bar.close.toFixed(2);
+  var elV=document.getElementById('statVolume');if (elV) elV.textContent = bar.volume ? bar.volume.toFixed(0) : '—';
   var chg = bar.close - bar.open;
   var el = document.getElementById('statChange');
-  el.textContent = (chg>=0?'+':'') + chg.toFixed(2);
-  el.className = 'sidebar-value ' + (chg>=0?'bull':'bear');
+  if (el) {
+    el.textContent = (chg>=0?'+':'') + chg.toFixed(2);
+    el.className = 'sidebar-value ' + (chg>=0?'bull':'bear');
+  }
 }
 
 function updateHeader(bar, prev) {
   if (!bar) return;
-  document.getElementById('tickerPrice').textContent = bar.close.toFixed(2);
+  var tp=document.getElementById('tickerPrice'); if (tp) tp.textContent = bar.close.toFixed(2);
   var el = document.getElementById('tickerChange');
+  if (!el) return;
   if (prev) {
     var d = bar.close - prev.close;
     var pct = prev.close ? (d/prev.close*100) : 0;
@@ -300,14 +325,13 @@ function resizeMainChart() {
 }
 
 function resizePaneCharts() {
-  if (paneState.rsi && paneState.rsi.chart) {
-    var s = getHostSize(paneState.rsi.host, OSC_PANE_HEIGHT);
-    paneState.rsi.chart.applyOptions({width:s.width, height:s.height});
-  }
-  if (paneState.stoch && paneState.stoch.chart) {
-    var s2 = getHostSize(paneState.stoch.host, OSC_PANE_HEIGHT);
-    paneState.stoch.chart.applyOptions({width:s2.width, height:s2.height});
-  }
+  ['rsi','stoch','atr'].forEach(function(key){
+    var pane = paneState[key];
+    if (pane && pane.chart) {
+      var s = getHostSize(pane.host, OSC_PANE_HEIGHT);
+      pane.chart.applyOptions({width:s.width, height:s.height});
+    }
+  });
 }
 
 function resizeAllCharts() { resizeMainChart(); resizePaneCharts(); }
@@ -316,37 +340,27 @@ function syncPanesFromMain(range) {
   if (!range || range.from == null || range.to == null || ignoreTimeSync) return;
   ignoreTimeSync = true;
   try {
-    if (paneState.rsi && paneState.rsi.chart) safeSetVisibleRange(paneState.rsi.chart, range);
-    if (paneState.stoch && paneState.stoch.chart) safeSetVisibleRange(paneState.stoch.chart, range);
+    ['rsi','stoch','atr'].forEach(function(key){
+      var pane = paneState[key];
+      if (pane && pane.chart) safeSetVisibleRange(pane.chart, range);
+    });
   } finally {
     requestAnimationFrame(function(){ ignoreTimeSync = false; });
   }
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   MARKER SYSTEM (all markers on candleSeries — guaranteed visible)
+   MARKER SYSTEM
 ────────────────────────────────────────────────────────────────── */
 function refreshAllMarkers() {
   if (!loadedData.length) { candleSeries.setMarkers([]); return; }
   var fromT = loadedData[0].time;
   var toT = loadedData[loadedData.length-1].time;
-
   function inWindow(m) { return m.time >= fromT && m.time <= toT; }
-
   var all = [];
-  // Signal markers
-  for (var i = 0; i < _signalMarkers.length; i++) {
-    if (inWindow(_signalMarkers[i])) all.push(_signalMarkers[i]);
-  }
-  // Backtest entry markers
-  for (var j = 0; j < _btEntryMarkers.length; j++) {
-    if (inWindow(_btEntryMarkers[j])) all.push(_btEntryMarkers[j]);
-  }
-  // Backtest exit markers
-  for (var k = 0; k < _btExitMarkers.length; k++) {
-    if (inWindow(_btExitMarkers[k])) all.push(_btExitMarkers[k]);
-  }
-
+  for (var i = 0; i < _signalMarkers.length; i++) if (inWindow(_signalMarkers[i])) all.push(_signalMarkers[i]);
+  for (var j = 0; j < _btEntryMarkers.length; j++) if (inWindow(_btEntryMarkers[j])) all.push(_btEntryMarkers[j]);
+  for (var k = 0; k < _btExitMarkers.length; k++) if (inWindow(_btExitMarkers[k])) all.push(_btExitMarkers[k]);
   all.sort(function(a,b){ return a.time - b.time; });
   candleSeries.setMarkers(all);
 }
@@ -377,7 +391,6 @@ function rebuildBacktestMarkerCache(trades) {
   _btEntryMarkers = [];
   _btExitMarkers = [];
   if (!fullBacktestTrades.length || !fullData.length) return;
-
   var seenE = {}, seenX = {};
   for (var i = 0; i < fullBacktestTrades.length; i++) {
     var t = fullBacktestTrades[i];
@@ -392,8 +405,7 @@ function rebuildBacktestMarkerCache(trades) {
       var tpVal = Number(t.initial_tp != null ? t.initial_tp : t.tp_level);
       var slStr = isFinite(slVal) ? ' SL:' + slVal.toFixed(2) : '';
       var tpStr = isFinite(tpVal) ? ' TP:' + tpVal.toFixed(2) : '';
-      var riskStr = '';
-      var rMult = '';
+      var riskStr = ''; var rMult = '';
       if (isFinite(slVal) && isFinite(entryPrice)) {
         var riskPts = Math.abs(entryPrice - slVal);
         riskStr = ' risk:' + riskPts.toFixed(2) + 'pt';
@@ -403,8 +415,7 @@ function rebuildBacktestMarkerCache(trades) {
         }
       }
       _btEntryMarkers.push({
-        time: entryTime,
-        position: isLong ? 'belowBar' : 'aboveBar',
+        time: entryTime, position: isLong ? 'belowBar' : 'aboveBar',
         color: isLong ? '#00e676' : '#ff3d5a',
         shape: isLong ? 'arrowUp' : 'arrowDown',
         text: (isLong ? 'BUY' : 'SELL') + priceStr + slStr + tpStr + riskStr + rMult,
@@ -436,12 +447,9 @@ function rebuildBacktestMarkerCache(trades) {
           trailStr = ' trailSL:' + finalSl.toFixed(2);
         }
         _btExitMarkers.push({
-          time: exitTime,
-          position: isLong ? 'aboveBar' : 'belowBar',
-          color: exitColor(t.exit_reason),
-          shape: 'circle',
-          text: reason + exitPriceStr + netStr + lotStr + trailStr,
-          size: 1,
+          time: exitTime, position: isLong ? 'aboveBar' : 'belowBar',
+          color: exitColor(t.exit_reason), shape: 'circle',
+          text: reason + exitPriceStr + netStr + lotStr + trailStr, size: 1,
         });
       }
     }
@@ -452,6 +460,7 @@ function rebuildBacktestMarkerCache(trades) {
 
 window.plotBacktestMarkers = function(trades) {
   _signalMarkers = [];
+  clearSignalPriceLines();
   rebuildBacktestMarkerCache(trades);
   refreshAllMarkers();
 };
@@ -464,7 +473,7 @@ window.clearBacktestMarkers = function() {
 };
 
 /* ──────────────────────────────────────────────────────────────────
-   WINDOW MANAGER (CORE FIX — anti-loop, stable viewport)
+   WINDOW MANAGER
 ────────────────────────────────────────────────────────────────── */
 function applyLoadedWindow() {
   loadedData = fullData.slice(loadedWindow.start, loadedWindow.end);
@@ -472,7 +481,6 @@ function applyLoadedWindow() {
   volumeSeries.setData(volumeDataForLoadedWindow());
   refreshAllMarkers();
   scheduleIndicatorRender();
-
   var last = loadedData[loadedData.length-1] || fullData[fullData.length-1];
   updateSidebar(last);
   var candlesEl = document.getElementById('statCandles');
@@ -480,74 +488,43 @@ function applyLoadedWindow() {
 }
 
 function shiftWindow(newStart, newEnd, preserveRange) {
-  if (_isShifting) {
-    _shiftQueued = { start:newStart, end:newEnd, range:preserveRange };
-    return;
-  }
-
+  if (_isShifting) { _shiftQueued = { start:newStart, end:newEnd, range:preserveRange }; return; }
   if (newStart === loadedWindow.start && newEnd === loadedWindow.end) return;
-
   _isShifting = true;
-
   loadedWindow = { start: Math.max(0,newStart), end: Math.min(fullData.length, newEnd) };
   applyLoadedWindow();
-
-  if (preserveRange) {
-    safeSetVisibleRange(mainChart, preserveRange);
-    syncPanesFromMain(preserveRange);
-  }
-
-  // Hold lock for 2 frames so chart settles before allowing new shifts
+  if (preserveRange) { safeSetVisibleRange(mainChart, preserveRange); syncPanesFromMain(preserveRange); }
   requestAnimationFrame(function() {
     requestAnimationFrame(function() {
       _isShifting = false;
-      if (_shiftQueued) {
-        var q = _shiftQueued;
-        _shiftQueued = null;
-        shiftWindow(q.start, q.end, q.range);
-      }
+      if (_shiftQueued) { var q = _shiftQueued; _shiftQueued = null; shiftWindow(q.start, q.end, q.range); }
     });
   });
 }
 
 function checkWindowExpansion(range) {
   if (_isShifting || !range || !fullData.length) return;
-
   var vis = visibleIndexRange(range);
   if (!vis) return;
-
   var leftDist  = vis.fromIdx - loadedWindow.start;
   var rightDist = loadedWindow.end - vis.toIdx - 1;
-
   var needLeft  = leftDist < TRIGGER_THRESHOLD && loadedWindow.start > 0;
   var needRight = rightDist < TRIGGER_THRESHOLD && loadedWindow.end < fullData.length;
-
   if (!needLeft && !needRight) return;
-
-  // Compute new window centered on visible range with buffer
   var newStart = Math.max(0, vis.fromIdx - BUFFER_BARS);
   var newEnd   = Math.min(fullData.length, vis.toIdx + 1 + BUFFER_BARS);
-
-  // Ensure visible range is fully contained
   newStart = Math.min(newStart, vis.fromIdx);
   newEnd   = Math.max(newEnd, vis.toIdx + 1);
-
   if (newStart === loadedWindow.start && newEnd === loadedWindow.end) return;
-
   shiftWindow(newStart, newEnd, range);
 }
 
 function handleMainVisibleRangeChange(range) {
   if (_isShifting) return;
   if (!range || range.from == null || range.to == null || !fullData.length) return;
-
   lastVisibleRange = range;
   syncPanesFromMain(range);
-
-  // Update oscillator readouts
   updateOscillatorReadoutsAtTime(range.to);
-
-  // Debounced window expansion check
   if (_shiftTimer) clearTimeout(_shiftTimer);
   _shiftTimer = setTimeout(function() {
     _shiftTimer = null;
@@ -558,17 +535,13 @@ function handleMainVisibleRangeChange(range) {
 mainChart.timeScale().subscribeVisibleTimeRangeChange(handleMainVisibleRangeChange);
 
 /* ──────────────────────────────────────────────────────────────────
-   INDICATOR MATH (O(n) precomputation — unchanged)
+   INDICATOR MATH
 ────────────────────────────────────────────────────────────────── */
 function precomputeSma(values, period) {
   var n=values.length, out=new Array(n).fill(null);
   if (period<1||n<period) return out;
   var sum=0;
-  for (var i=0;i<n;i++) {
-    sum+=values[i];
-    if (i>=period) sum-=values[i-period];
-    if (i>=period-1) out[i]=sum/period;
-  }
+  for (var i=0;i<n;i++) { sum+=values[i]; if (i>=period) sum-=values[i-period]; if (i>=period-1) out[i]=sum/period; }
   return out;
 }
 
@@ -597,9 +570,7 @@ function precomputeHma(values, period) {
   var p=Math.max(2,period|0), half=Math.max(1,Math.floor(p/2)), sq=Math.max(1,Math.floor(Math.sqrt(p)));
   var full=precomputeWma(values,p), halfW=precomputeWma(values,half);
   var diff=new Array(n).fill(null), fv=-1;
-  for (var i=0;i<n;i++) {
-    if (full[i]!=null&&halfW[i]!=null) { diff[i]=2*halfW[i]-full[i]; if (fv===-1) fv=i; }
-  }
+  for (var i=0;i<n;i++) { if (full[i]!=null&&halfW[i]!=null) { diff[i]=2*halfW[i]-full[i]; if (fv===-1) fv=i; } }
   if (fv===-1) return out;
   var compact=[], map=[];
   for (var j=fv;j<n;j++) { if (diff[j]!=null) { compact.push(diff[j]); map.push(j); } }
@@ -686,6 +657,31 @@ function precomputeStochRsi(values, rsiLength, smoothK, smoothD) {
   return {rsi:rsi,k:k,d:d};
 }
 
+// Wilder's ATR
+function precomputeAtr(bars, period) {
+  var n = bars.length, out = new Array(n).fill(null);
+  if (!n || period < 1 || n < period + 1) return out;
+  var tr = new Array(n).fill(null);
+  tr[0] = bars[0].high - bars[0].low;
+  for (var i = 1; i < n; i++) {
+    var pc = bars[i-1].close;
+    var h = bars[i].high, l = bars[i].low;
+    var a = h - l;
+    var b = Math.abs(h - pc);
+    var c = Math.abs(l - pc);
+    tr[i] = a > b ? (a > c ? a : c) : (b > c ? b : c);
+  }
+  var sum = 0;
+  for (var k = 1; k <= period; k++) sum += tr[k];
+  var atr = sum / period;
+  out[period] = atr;
+  for (var j = period + 1; j < n; j++) {
+    atr = ((atr * (period - 1)) + tr[j]) / period;
+    out[j] = atr;
+  }
+  return out;
+}
+
 /* ──────────────────────────────────────────────────────────────────
    PANE MANAGEMENT
 ────────────────────────────────────────────────────────────────── */
@@ -722,7 +718,7 @@ function createPaneChart(host) {
 }
 
 function updateOscillatorWrapVisibility() {
-  oscillatorWrap.style.display = (paneState.rsi||paneState.stoch) ? 'flex' : 'none';
+  oscillatorWrap.style.display = (paneState.rsi||paneState.stoch||paneState.atr) ? 'flex' : 'none';
   var hasOsc = oscillatorWrap.style.display !== 'none';
   mainChart.applyOptions({rightPriceScale:{borderColor:'#1e2a38',visible:true,
     minimumWidth:PRICE_SCALE_MIN_WIDTH,scaleMargins:hasOsc?{top:0.08,bottom:0.08}:{top:0.08,bottom:0.18}}});
@@ -735,18 +731,24 @@ function updateOscillatorWrapVisibility() {
   });
 }
 
+function syncFromPane(range) {
+  if (ignoreTimeSync||!range||range.from==null||range.to==null) return;
+  ignoreTimeSync=true;
+  try {
+    safeSetVisibleRange(mainChart,range);
+    ['rsi','stoch','atr'].forEach(function(key){
+      var pane = paneState[key];
+      if (pane && pane.chart) safeSetVisibleRange(pane.chart, range);
+    });
+  } finally { requestAnimationFrame(function(){ignoreTimeSync=false;}); }
+}
+
 function ensureRsiPane() {
   if (paneState.rsi) return paneState.rsi;
   var pane=createPaneHost('RSI');
   var chart=createPaneChart(pane.host);
   paneState.rsi={host:pane.host,valuesLabel:pane.valuesLabel,chart:chart,dynamicSeries:new Map()};
-  chart.subscribeVisibleTimeRangeChange(function(range){
-    if (ignoreTimeSync||!range||range.from==null||range.to==null) return;
-    ignoreTimeSync=true;
-    try { safeSetVisibleRange(mainChart,range);
-      if (paneState.stoch&&paneState.stoch.chart) safeSetVisibleRange(paneState.stoch.chart,range);
-    } finally { requestAnimationFrame(function(){ignoreTimeSync=false;}); }
-  });
+  chart.timeScale().subscribeVisibleTimeRangeChange(syncFromPane);
   chart.subscribeCrosshairMove(function(param){
     if (!paneState.rsi) return;
     var texts=[];
@@ -773,13 +775,7 @@ function ensureStochPane() {
   var pane=createPaneHost('STOCH RSI');
   var chart=createPaneChart(pane.host);
   paneState.stoch={host:pane.host,valuesLabel:pane.valuesLabel,chart:chart,dynamicSeries:new Map()};
-  chart.subscribeVisibleTimeRangeChange(function(range){
-    if (ignoreTimeSync||!range||range.from==null||range.to==null) return;
-    ignoreTimeSync=true;
-    try { safeSetVisibleRange(mainChart,range);
-      if (paneState.rsi&&paneState.rsi.chart) safeSetVisibleRange(paneState.rsi.chart,range);
-    } finally { requestAnimationFrame(function(){ignoreTimeSync=false;}); }
-  });
+  chart.timeScale().subscribeVisibleTimeRangeChange(syncFromPane);
   chart.subscribeCrosshairMove(function(param){
     if (!paneState.stoch) return;
     var texts=[];
@@ -803,9 +799,37 @@ function ensureStochPane() {
   return paneState.stoch;
 }
 
+function ensureAtrPane() {
+  if (paneState.atr) return paneState.atr;
+  var pane=createPaneHost('ATR');
+  var chart=createPaneChart(pane.host);
+  paneState.atr={host:pane.host,valuesLabel:pane.valuesLabel,chart:chart,dynamicSeries:new Map()};
+  chart.timeScale().subscribeVisibleTimeRangeChange(syncFromPane);
+  chart.subscribeCrosshairMove(function(param){
+    if (!paneState.atr) return;
+    var texts=[];
+    paneState.atr.dynamicSeries.forEach(function(entry,id){
+      var dp=param.seriesData?param.seriesData.get(entry.line):null;
+      if (dp&&dp.value!=null) {
+        var ind=indicators.find(function(x){return x.id===id});
+        if (ind) texts.push(formatIndicatorLabel(ind)+' '+dp.value.toFixed(2));
+      }
+    });
+    paneState.atr.valuesLabel.textContent=texts.length?texts.join(' · '):'—';
+  });
+  updateOscillatorWrapVisibility();
+  requestAnimationFrame(function(){requestAnimationFrame(function(){
+    resizePaneCharts();
+    var range=lastVisibleRange;
+    if (range) safeSetVisibleRange(chart,range);
+  });});
+  return paneState.atr;
+}
+
 function destroyUnusedPanes() {
   var needRsi=indicators.some(function(i){return i.type==='RSI'});
   var needStoch=indicators.some(function(i){return i.type==='Stoch RSI'});
+  var needAtr=indicators.some(function(i){return i.type==='ATR'});
   if (!needRsi&&paneState.rsi) {
     paneState.rsi.dynamicSeries.forEach(function(e){Object.values(e).forEach(function(s){try{paneState.rsi.chart.removeSeries(s)}catch(err){}})});
     try{paneState.rsi.chart.remove()}catch(e){}
@@ -817,6 +841,12 @@ function destroyUnusedPanes() {
     try{paneState.stoch.chart.remove()}catch(e){}
     try{oscillatorWrap.removeChild(paneState.stoch.host)}catch(e){}
     paneState.stoch=null;
+  }
+  if (!needAtr&&paneState.atr) {
+    paneState.atr.dynamicSeries.forEach(function(e){Object.values(e).forEach(function(s){try{paneState.atr.chart.removeSeries(s)}catch(err){}})});
+    try{paneState.atr.chart.remove()}catch(e){}
+    try{oscillatorWrap.removeChild(paneState.atr.host)}catch(e){}
+    paneState.atr=null;
   }
   updateOscillatorWrapVisibility();
 }
@@ -846,6 +876,9 @@ function removeIndicatorSeries(indicatorId) {
   } else if (reg.kind==='stoch'&&paneState.stoch) {
     var entry2=paneState.stoch.dynamicSeries.get(indicatorId);
     if (entry2) { Object.values(entry2).forEach(function(s){try{paneState.stoch.chart.removeSeries(s)}catch(e){}}); paneState.stoch.dynamicSeries.delete(indicatorId); }
+  } else if (reg.kind==='atr'&&paneState.atr) {
+    var entry3=paneState.atr.dynamicSeries.get(indicatorId);
+    if (entry3) { Object.values(entry3).forEach(function(s){try{paneState.atr.chart.removeSeries(s)}catch(e){}}); paneState.atr.dynamicSeries.delete(indicatorId); }
   }
   indicatorSeriesRegistry.delete(indicatorId);
 }
@@ -876,6 +909,14 @@ function ensureIndicatorSeries(ind) {
     var reg2={kind:'stoch',series:[k,d,ob2,os2]};
     indicatorSeriesRegistry.set(ind.id,reg2); return reg2;
   }
+  if (ind.type==='ATR') {
+    var paneA=ensureAtrPane();
+    var lineA=paneA.chart.addLineSeries({color:ind.color,lineWidth:1.4,priceLineVisible:true,
+      lastValueVisible:true,crosshairMarkerVisible:true,priceScaleId:'right'});
+    paneA.dynamicSeries.set(ind.id,{line:lineA});
+    var regA={kind:'atr',series:[lineA]};
+    indicatorSeriesRegistry.set(ind.id,regA); return regA;
+  }
   if (ind.type==='BB') {
     var upper=makeMainOverlaySeries(withAlpha(ind.color,0.95),1.1,LightweightCharts.LineStyle.Dashed);
     var basis=makeMainOverlaySeries(withAlpha(ind.color,0.65),1.15,LightweightCharts.LineStyle.Solid);
@@ -887,11 +928,6 @@ function ensureIndicatorSeries(ind) {
   var reg4={kind:'main',series:[ma]};
   indicatorSeriesRegistry.set(ind.id,reg4); return reg4;
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// PART 2 — UI, Indicator CRUD, Signals, Data Loading, Init
-// (paste directly after PART 1 inside the same IIFE)
-// ═══════════════════════════════════════════════════════════════════
 
 /* ──────────────────────────────────────────────────────────────────
    OSCILLATOR READOUTS
@@ -910,6 +946,7 @@ function updateOscillatorReadoutsAtTime(time) {
   if (idx < 0) {
     if (paneState.rsi) paneState.rsi.valuesLabel.textContent = '—';
     if (paneState.stoch) paneState.stoch.valuesLabel.textContent = '—';
+    if (paneState.atr) paneState.atr.valuesLabel.textContent = '—';
     return;
   }
   if (paneState.rsi) {
@@ -935,6 +972,16 @@ function updateOscillatorReadoutsAtTime(time) {
       }
     });
     paneState.stoch.valuesLabel.textContent = texts2.length ? texts2.join(' · ') : '—';
+  }
+  if (paneState.atr) {
+    var texts3 = [];
+    paneState.atr.dynamicSeries.forEach(function(entry, id) {
+      var ind = indicators.find(function(x){return x.id===id});
+      var computed = lastRenderedComputed.get(id);
+      if (ind && computed && computed.raw && computed.raw[idx] != null)
+        texts3.push(formatIndicatorLabel(ind) + ' ' + computed.raw[idx].toFixed(2));
+    });
+    paneState.atr.valuesLabel.textContent = texts3.length ? texts3.join(' · ') : '—';
   }
 }
 
@@ -979,6 +1026,15 @@ function computeIndicatorForLoadedWindow(ind) {
     var line = [];
     for (var j = 0; j < visibleLen; j++) { if (raw[j] != null) line.push({time:times[offset+j],value:raw[j]}); }
     result = {kind:'rsi',raw:raw,line:line};
+  } else if (ind.type === 'ATR') {
+    var atrBars = fullData.slice(calcStart, calcEnd);
+    var atrFull = precomputeAtr(atrBars, ind.length);
+    var atrRaw = atrFull.slice(offset, offset + visibleLen);
+    var atrLine = [];
+    for (var aa = 0; aa < visibleLen; aa++) {
+      if (atrRaw[aa] != null) atrLine.push({time:times[offset + aa], value:atrRaw[aa]});
+    }
+    result = {kind:'atr', raw:atrRaw, line:atrLine};
   } else if (ind.type === 'Stoch RSI') {
     var stoch = precomputeStochRsi(values, ind.length, ind.smoothK||3, ind.smoothD||3);
     var kRaw = stoch.k.slice(offset, offset + visibleLen);
@@ -1005,7 +1061,6 @@ function renderLevelLines() {
   if (!loadedData.length) return;
   var start = loadedData[0].time;
   var end = loadedData[loadedData.length-1].time;
-
   indicators.forEach(function(ind) {
     if (ind.type === 'RSI' && paneState.rsi) {
       var entry = paneState.rsi.dynamicSeries.get(ind.id);
@@ -1047,6 +1102,10 @@ function renderIndicatorsNow() {
       reg.series[2].applyOptions({visible:ind.visible});
       reg.series[3].applyOptions({visible:ind.visible && ind.showMid !== false});
       lastRenderedIndicatorRawValues.set(ind.id, computed.raw);
+    } else if (ind.type === 'ATR') {
+      reg.series[0].setData(ind.visible ? computed.line : []);
+      reg.series[0].applyOptions({color:ind.color, visible:ind.visible});
+      lastRenderedIndicatorRawValues.set(ind.id, computed.raw);
     } else if (ind.type === 'Stoch RSI') {
       reg.series[0].setData(ind.visible ? computed.kLine : []);
       reg.series[1].setData(ind.visible ? computed.dLine : []);
@@ -1076,40 +1135,176 @@ function scheduleIndicatorRender() {
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   SIGNALS
+   SIGNAL ENGINE v2 (with ATR SL/TP + crossover + candle filter)
 ────────────────────────────────────────────────────────────────── */
-function computeSignals(data, maValues) {
-  if (!signalEnabled || !data || !data.length || !maValues || !maValues.length) return [];
+function getAtrRawForSignals() {
+  if (!signalConfig.atrIndicatorId) return null;
+  var atrInd = indicators.find(function(x){return x.id===signalConfig.atrIndicatorId && x.type==='ATR' && x.visible});
+  if (!atrInd) return null;
+  return lastRenderedIndicatorRawValues.get(atrInd.id) || null;
+}
+
+function clearSignalPriceLines() {
+  try { if (_signalSlLine) candleSeries.removePriceLine(_signalSlLine); } catch(e) {}
+  try { if (_signalTpLine) candleSeries.removePriceLine(_signalTpLine); } catch(e) {}
+  try { if (_signalEntryLine) candleSeries.removePriceLine(_signalEntryLine); } catch(e) {}
+  _signalSlLine = null; _signalTpLine = null; _signalEntryLine = null;
+}
+
+function drawSignalPriceLines(entryPrice, slPrice, tpPrice, isLong) {
+  clearSignalPriceLines();
+  if (!signalConfig.showSlTpLines) return;
+  try {
+    _signalEntryLine = candleSeries.createPriceLine({
+      price: entryPrice,
+      color: isLong ? '#00e676' : '#ff3d5a',
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Solid,
+      axisLabelVisible: true,
+      title: (isLong ? 'L ENTRY ' : 'S ENTRY ') + entryPrice.toFixed(2),
+    });
+  } catch(e) {}
+  if (isFinite(slPrice)) {
+    try {
+      _signalSlLine = candleSeries.createPriceLine({
+        price: slPrice,
+        color: '#ff3d5a',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: 'SL ' + slPrice.toFixed(2),
+      });
+    } catch(e) {}
+  }
+  if (isFinite(tpPrice)) {
+    try {
+      _signalTpLine = candleSeries.createPriceLine({
+        price: tpPrice,
+        color: '#00e676',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: 'TP ' + tpPrice.toFixed(2),
+      });
+    } catch(e) {}
+  }
+}
+
+function buildSignalMarkerText(isLong, entry, atrVal) {
+  var txt = isLong ? 'BUY' : 'SELL';
+  txt += ' @' + entry.toFixed(2);
+  if (isFinite(atrVal) && atrVal > 0) {
+    var slDist = signalConfig.slMult * atrVal;
+    var tpDist = signalConfig.tpMult * atrVal;
+    var sl = isLong ? entry - slDist : entry + slDist;
+    var tp = isLong ? entry + tpDist : entry - tpDist;
+    txt += ' SL:' + sl.toFixed(2) + ' TP:' + tp.toFixed(2);
+    txt += ' (R:' + (tpDist/slDist).toFixed(1) + ')';
+  }
+  return txt;
+}
+
+function computeSignalsAboveBelow(data, maRaw, atrRaw) {
   var markers = [];
+  var lastSig = null;
+  if (!data.length || !maRaw || !maRaw.length) return {markers:markers, lastSig:lastSig};
   var bullCount = 0, bearCount = 0;
+  var need = Math.max(1, signalConfig.consecutiveBars|0);
   for (var i = 1; i < data.length; i++) {
-    var bar = data[i], mv = maValues[i];
+    var bar = data[i], mv = maRaw[i];
     if (mv == null) { bullCount = 0; bearCount = 0; continue; }
     var c = bar.close, o = bar.open;
     var above = c > mv, below = c < mv;
     var bull = c >= o, bear = c < o;
-    if (above && bull) bullCount++; else bullCount = 0;
-    if (below && bear) bearCount++; else bearCount = 0;
-    if (bullCount >= 2) {
-      markers.push({time:bar.time,position:'belowBar',color:'#00e676',shape:'arrowUp',text:'BUY',size:1});
+    var passBull = !signalConfig.requireCandleDir || bull;
+    var passBear = !signalConfig.requireCandleDir || bear;
+    if (above && passBull) bullCount++; else bullCount = 0;
+    if (below && passBear) bearCount++; else bearCount = 0;
+    if (bullCount >= need) {
+      var atrV = atrRaw ? atrRaw[i] : null;
+      markers.push({time:bar.time, position:'belowBar', color:'#00e676', shape:'arrowUp',
+        text: buildSignalMarkerText(true, c, atrV), size:1});
+      lastSig = {isLong:true, entry:c, atr:atrV, time:bar.time};
       bullCount = 0;
     }
-    if (bearCount >= 2) {
-      markers.push({time:bar.time,position:'aboveBar',color:'#ff3d5a',shape:'arrowDown',text:'SELL',size:1});
+    if (bearCount >= need) {
+      var atrV2 = atrRaw ? atrRaw[i] : null;
+      markers.push({time:bar.time, position:'aboveBar', color:'#ff3d5a', shape:'arrowDown',
+        text: buildSignalMarkerText(false, c, atrV2), size:1});
+      lastSig = {isLong:false, entry:c, atr:atrV2, time:bar.time};
       bearCount = 0;
     }
   }
-  return markers;
+  return {markers:markers, lastSig:lastSig};
+}
+
+function computeSignalsCross(data, maA, maB, atrRaw) {
+  var markers = [];
+  var lastSig = null;
+  if (!data.length || !maA || !maB || maA.length !== data.length || maB.length !== data.length)
+    return {markers:markers, lastSig:lastSig};
+  for (var i = 1; i < data.length; i++) {
+    var a = maA[i], b = maB[i], pa = maA[i-1], pb = maB[i-1];
+    if (a == null || b == null || pa == null || pb == null) continue;
+    var bullCross = pa <= pb && a > b;
+    var bearCross = pa >= pb && a < b;
+    if (!bullCross && !bearCross) continue;
+    var bar = data[i];
+    var bullCandle = bar.close >= bar.open;
+    if (bullCross) {
+      if (signalConfig.requireCandleDir && !bullCandle) continue;
+      var atrV = atrRaw ? atrRaw[i] : null;
+      markers.push({time:bar.time, position:'belowBar', color:'#00e676', shape:'arrowUp',
+        text: buildSignalMarkerText(true, bar.close, atrV), size:1});
+      lastSig = {isLong:true, entry:bar.close, atr:atrV, time:bar.time};
+    } else if (bearCross) {
+      if (signalConfig.requireCandleDir && bullCandle) continue;
+      var atrV2 = atrRaw ? atrRaw[i] : null;
+      markers.push({time:bar.time, position:'aboveBar', color:'#ff3d5a', shape:'arrowDown',
+        text: buildSignalMarkerText(false, bar.close, atrV2), size:1});
+      lastSig = {isLong:false, entry:bar.close, atr:atrV2, time:bar.time};
+    }
+  }
+  return {markers:markers, lastSig:lastSig};
 }
 
 function refreshSignals() {
   _signalMarkers = [];
-  if (!signalEnabled || !signalIndicatorId) { refreshAllMarkers(); return; }
-  var ind = indicators.find(function(x){return x.id===signalIndicatorId && x.visible});
-  if (!ind || ['EMA','HMA','SMA','WMA'].indexOf(ind.type) < 0) { refreshAllMarkers(); return; }
-  var raw = lastRenderedIndicatorRawValues.get(ind.id);
-  if (!raw || !loadedData.length) { refreshAllMarkers(); return; }
-  _signalMarkers = computeSignals(loadedData, raw);
+  clearSignalPriceLines();
+
+  if (!signalConfig.enabled || !loadedData.length) { refreshAllMarkers(); return; }
+  var atrRaw = getAtrRawForSignals();
+
+  var result = null;
+
+  if (signalConfig.mode === 'aboveBelow') {
+    var indA = indicators.find(function(x){return x.id===signalConfig.primaryIndicatorId && x.visible && MA_TYPES.indexOf(x.type)>=0});
+    if (!indA) { refreshAllMarkers(); return; }
+    var rawA = lastRenderedIndicatorRawValues.get(indA.id);
+    if (!rawA) { refreshAllMarkers(); return; }
+    result = computeSignalsAboveBelow(loadedData, rawA, atrRaw);
+  } else if (signalConfig.mode === 'cross') {
+    var indP = indicators.find(function(x){return x.id===signalConfig.primaryIndicatorId && x.visible && MA_TYPES.indexOf(x.type)>=0});
+    var indS = indicators.find(function(x){return x.id===signalConfig.secondaryIndicatorId && x.visible && MA_TYPES.indexOf(x.type)>=0});
+    if (!indP || !indS || indP.id === indS.id) { refreshAllMarkers(); return; }
+    var rawP = lastRenderedIndicatorRawValues.get(indP.id);
+    var rawS = lastRenderedIndicatorRawValues.get(indS.id);
+    if (!rawP || !rawS) { refreshAllMarkers(); return; }
+    result = computeSignalsCross(loadedData, rawP, rawS, atrRaw);
+  }
+
+  if (result) {
+    _signalMarkers = result.markers;
+    if (result.lastSig && atrRaw && isFinite(result.lastSig.atr) && result.lastSig.atr > 0) {
+      var sig = result.lastSig;
+      var slDist = signalConfig.slMult * sig.atr;
+      var tpDist = signalConfig.tpMult * sig.atr;
+      var sl = sig.isLong ? sig.entry - slDist : sig.entry + slDist;
+      var tp = sig.isLong ? sig.entry + tpDist : sig.entry - tpDist;
+      drawSignalPriceLines(sig.entry, sl, tp, sig.isLong);
+    }
+  }
+
   refreshAllMarkers();
 }
 
@@ -1117,7 +1312,7 @@ function refreshSignals() {
    UI — OVERLAY CONTROLS
 ────────────────────────────────────────────────────────────────── */
 var topControls = document.createElement('div');
-Object.assign(topControls.style, {display:'flex',alignItems:'center',gap:'8px'});
+Object.assign(topControls.style, {display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'});
 overlayUi.appendChild(topControls);
 
 var indicatorsButton = document.createElement('button');
@@ -1130,18 +1325,29 @@ Object.assign(indicatorsButton.style, {
 });
 topControls.appendChild(indicatorsButton);
 
-var signalControl = document.createElement('div');
-Object.assign(signalControl.style, {
+var signalsButton = document.createElement('button');
+signalsButton.textContent = 'Signals';
+Object.assign(signalsButton.style, {
+  background:'#0d1117ee',border:'1px solid #1e2a38',color:'#c8d8e8',
+  fontFamily:"'Space Mono', monospace",fontSize:'0.62rem',fontWeight:'700',
+  letterSpacing:'0.08em',padding:'8px 12px',borderRadius:'6px',cursor:'pointer',
+  boxShadow:'0 8px 20px rgba(0,0,0,0.24)',backdropFilter:'blur(8px)',
+});
+topControls.appendChild(signalsButton);
+
+var signalToggle = document.createElement('div');
+Object.assign(signalToggle.style, {
   display:'flex',alignItems:'center',gap:'6px',background:'#0d1117ee',
   border:'1px solid #1e2a38',borderRadius:'6px',padding:'6px 8px',
   boxShadow:'0 8px 20px rgba(0,0,0,0.24)',backdropFilter:'blur(8px)',
 });
-topControls.appendChild(signalControl);
+topControls.appendChild(signalToggle);
 
 var activeChipsWrap = document.createElement('div');
-Object.assign(activeChipsWrap.style, {display:'flex',flexWrap:'wrap',gap:'6px',maxWidth:'620px'});
+Object.assign(activeChipsWrap.style, {display:'flex',flexWrap:'wrap',gap:'6px',maxWidth:'640px'});
 overlayUi.appendChild(activeChipsWrap);
 
+// Indicator Panel
 var indicatorPanel = document.createElement('div');
 Object.assign(indicatorPanel.style, {
   display:'none',width:'420px',maxHeight:'min(70vh, 720px)',background:'#0d1117f4',
@@ -1150,22 +1356,50 @@ Object.assign(indicatorPanel.style, {
 });
 overlayUi.appendChild(indicatorPanel);
 
-var panelScroll = document.createElement('div');
-Object.assign(panelScroll.style, {maxHeight:'inherit',overflowY:'auto'});
-indicatorPanel.appendChild(panelScroll);
+var indPanelScroll = document.createElement('div');
+Object.assign(indPanelScroll.style, {maxHeight:'inherit',overflowY:'auto'});
+indicatorPanel.appendChild(indPanelScroll);
 
-var panelOpen = false;
-function setPanelOpen(open) {
-  panelOpen = !!open;
-  indicatorPanel.style.display = panelOpen ? 'block' : 'none';
-  indicatorsButton.style.borderColor = panelOpen ? '#00e5ff' : '#1e2a38';
-  indicatorsButton.style.color = panelOpen ? '#00e5ff' : '#c8d8e8';
-  indicatorsButton.style.background = panelOpen ? 'rgba(0,229,255,0.08)' : '#0d1117ee';
+// Signal Panel
+var signalPanel = document.createElement('div');
+Object.assign(signalPanel.style, {
+  display:'none',width:'460px',maxHeight:'min(70vh, 720px)',background:'#0d1117f4',
+  border:'1px solid #1e2a38',borderRadius:'8px',boxShadow:'0 18px 38px rgba(0,0,0,0.38)',
+  backdropFilter:'blur(10px)',overflow:'hidden',
+});
+overlayUi.appendChild(signalPanel);
+
+var sigPanelScroll = document.createElement('div');
+Object.assign(sigPanelScroll.style, {maxHeight:'inherit',overflowY:'auto'});
+signalPanel.appendChild(sigPanelScroll);
+
+var indPanelOpen = false;
+var sigPanelOpen = false;
+
+function setIndPanelOpen(open) {
+  indPanelOpen = !!open;
+  indicatorPanel.style.display = indPanelOpen ? 'block' : 'none';
+  indicatorsButton.style.borderColor = indPanelOpen ? '#00e5ff' : '#1e2a38';
+  indicatorsButton.style.color = indPanelOpen ? '#00e5ff' : '#c8d8e8';
+  indicatorsButton.style.background = indPanelOpen ? 'rgba(0,229,255,0.08)' : '#0d1117ee';
+  if (indPanelOpen) setSigPanelOpen(false);
 }
-indicatorsButton.addEventListener('click', function(e) { e.stopPropagation(); setPanelOpen(!panelOpen); });
+
+function setSigPanelOpen(open) {
+  sigPanelOpen = !!open;
+  signalPanel.style.display = sigPanelOpen ? 'block' : 'none';
+  signalsButton.style.borderColor = sigPanelOpen ? '#00e5ff' : '#1e2a38';
+  signalsButton.style.color = sigPanelOpen ? '#00e5ff' : '#c8d8e8';
+  signalsButton.style.background = sigPanelOpen ? 'rgba(0,229,255,0.08)' : '#0d1117ee';
+  if (sigPanelOpen) { setIndPanelOpen(false); renderSignalPanel(); }
+}
+
+indicatorsButton.addEventListener('click', function(e) { e.stopPropagation(); setIndPanelOpen(!indPanelOpen); });
+signalsButton.addEventListener('click', function(e) { e.stopPropagation(); setSigPanelOpen(!sigPanelOpen); });
 indicatorPanel.addEventListener('click', function(e) { e.stopPropagation(); });
+signalPanel.addEventListener('click', function(e) { e.stopPropagation(); });
 overlayUi.addEventListener('click', function(e) { e.stopPropagation(); });
-document.addEventListener('click', function() { setPanelOpen(false); });
+document.addEventListener('click', function() { setIndPanelOpen(false); setSigPanelOpen(false); });
 
 function makeUiLabel(text) {
   var el = document.createElement('div');
@@ -1182,23 +1416,24 @@ function styleUiInput(el) {
   return el;
 }
 
-// ── Panel header ────────────────────────────────────────────────
-var panelHeader = document.createElement('div');
-panelHeader.textContent = 'ADD / EDIT INDICATORS';
-Object.assign(panelHeader.style, {padding:'10px 12px',borderBottom:'1px solid #1e2a38',
+/* ──────────────────────────────────────────────────────────────────
+   UI — INDICATOR PANEL
+────────────────────────────────────────────────────────────────── */
+var indPanelHeader = document.createElement('div');
+indPanelHeader.textContent = 'ADD / EDIT INDICATORS';
+Object.assign(indPanelHeader.style, {padding:'10px 12px',borderBottom:'1px solid #1e2a38',
   fontFamily:"'Space Mono', monospace",fontSize:'0.62rem',fontWeight:'700',
   letterSpacing:'0.12em',color:'#00e5ff'});
-panelScroll.appendChild(panelHeader);
+indPanelScroll.appendChild(indPanelHeader);
 
-var panelBody = document.createElement('div');
-Object.assign(panelBody.style, {padding:'12px',display:'flex',flexDirection:'column',gap:'12px'});
-panelScroll.appendChild(panelBody);
+var indPanelBody = document.createElement('div');
+Object.assign(indPanelBody.style, {padding:'12px',display:'flex',flexDirection:'column',gap:'12px'});
+indPanelScroll.appendChild(indPanelBody);
 
-// ── Add section ─────────────────────────────────────────────────
 var addSection = document.createElement('div');
 Object.assign(addSection.style, {display:'flex',flexDirection:'column',gap:'10px',
   paddingBottom:'10px',borderBottom:'1px solid #1e2a38'});
-panelBody.appendChild(addSection);
+indPanelBody.appendChild(addSection);
 
 var addSectionTitle = document.createElement('div');
 addSectionTitle.textContent = 'NEW INDICATOR';
@@ -1274,7 +1509,7 @@ rowC.appendChild(addIndicatorButton);
 
 var editorSection = document.createElement('div');
 Object.assign(editorSection.style, {display:'flex',flexDirection:'column',gap:'10px'});
-panelBody.appendChild(editorSection);
+indPanelBody.appendChild(editorSection);
 
 function applyFormDefaults(type) {
   var d = defaultForType(type);
@@ -1292,31 +1527,216 @@ typeSelect.addEventListener('change', function() { applyFormDefaults(typeSelect.
 applyFormDefaults(typeSelect.value);
 
 /* ──────────────────────────────────────────────────────────────────
-   UI — SIGNAL CONTROL
+   UI — SIGNAL TOGGLE (quick on/off chip)
 ────────────────────────────────────────────────────────────────── */
-function renderSignalUi() {
-  signalControl.innerHTML = '';
-  var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = signalEnabled;
+function renderSignalToggle() {
+  signalToggle.innerHTML = '';
+  var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = signalConfig.enabled;
   cb.style.accentColor = '#00e5ff';
-  cb.addEventListener('change', function() { signalEnabled = cb.checked; renderSignalUi(); refreshSignals(); });
-  var label = document.createElement('span'); label.textContent = 'Signals';
-  Object.assign(label.style, {fontFamily:"'Space Mono', monospace",fontSize:'0.56rem',
-    fontWeight:'700',letterSpacing:'0.08em',color:signalEnabled?'#00e5ff':'#6e8798'});
-  signalControl.appendChild(cb); signalControl.appendChild(label);
-
-  var candidates = indicators.filter(function(ind){return ['EMA','HMA','SMA','WMA'].indexOf(ind.type)>=0});
-  if (!candidates.length) return;
-  if (!signalIndicatorId || !candidates.some(function(ind){return ind.id===signalIndicatorId}))
-    signalIndicatorId = candidates[0].id;
-
-  var select = styleUiInput(document.createElement('select'));
-  Object.assign(select.style, {width:'148px',padding:'5px 7px',fontSize:'0.56rem'});
-  candidates.forEach(function(ind) {
-    var o = document.createElement('option'); o.value = ind.id; o.textContent = formatIndicatorLabel(ind);
-    if (ind.id === signalIndicatorId) o.selected = true; select.appendChild(o);
+  cb.addEventListener('change', function() {
+    signalConfig.enabled = cb.checked;
+    renderSignalToggle();
+    refreshSignals();
+    if (sigPanelOpen) renderSignalPanel();
   });
-  select.addEventListener('change', function() { signalIndicatorId = select.value; refreshSignals(); });
-  signalControl.appendChild(select);
+  var label = document.createElement('span'); label.textContent = 'Signals ON';
+  if (!signalConfig.enabled) label.textContent = 'Signals OFF';
+  Object.assign(label.style, {fontFamily:"'Space Mono', monospace",fontSize:'0.56rem',
+    fontWeight:'700',letterSpacing:'0.08em',color:signalConfig.enabled?'#00e5ff':'#6e8798'});
+  signalToggle.appendChild(cb); signalToggle.appendChild(label);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   UI — SIGNAL SETTINGS PANEL
+────────────────────────────────────────────────────────────────── */
+function renderSignalPanel() {
+  sigPanelScroll.innerHTML = '';
+
+  var header = document.createElement('div');
+  header.textContent = 'SIGNAL SETTINGS';
+  Object.assign(header.style, {padding:'10px 12px',borderBottom:'1px solid #1e2a38',
+    fontFamily:"'Space Mono', monospace",fontSize:'0.62rem',fontWeight:'700',
+    letterSpacing:'0.12em',color:'#00e5ff'});
+  sigPanelScroll.appendChild(header);
+
+  var body = document.createElement('div');
+  Object.assign(body.style, {padding:'12px',display:'flex',flexDirection:'column',gap:'12px'});
+  sigPanelScroll.appendChild(body);
+
+  // Enable
+  var enRow = document.createElement('div');
+  Object.assign(enRow.style, {display:'flex',alignItems:'center',gap:'8px'});
+  var enCb = document.createElement('input'); enCb.type='checkbox'; enCb.checked=signalConfig.enabled;
+  enCb.style.accentColor='#00e5ff';
+  enCb.addEventListener('change', function() {
+    signalConfig.enabled = enCb.checked; renderSignalToggle(); refreshSignals(); renderSignalPanel();
+  });
+  var enLbl = document.createElement('span'); enLbl.textContent = 'ENABLE SIGNALS';
+  Object.assign(enLbl.style, {fontFamily:"'Space Mono', monospace",fontSize:'0.58rem',
+    fontWeight:'700',letterSpacing:'0.10em',color:'#c8d8e8'});
+  enRow.appendChild(enCb); enRow.appendChild(enLbl);
+  body.appendChild(enRow);
+
+  // Mode
+  var modeWrap = document.createElement('div');
+  modeWrap.appendChild(makeUiLabel('MODE'));
+  var modeSel = styleUiInput(document.createElement('select'));
+  [['cross','MA CROSSOVER (A crosses B)'],['aboveBelow','PRICE vs MA + N CANDLES']].forEach(function(opt){
+    var o = document.createElement('option'); o.value=opt[0]; o.textContent=opt[1];
+    if (signalConfig.mode===opt[0]) o.selected=true; modeSel.appendChild(o);
+  });
+  modeSel.addEventListener('change', function() {
+    signalConfig.mode = modeSel.value; renderSignalPanel(); refreshSignals();
+  });
+  modeWrap.appendChild(modeSel); body.appendChild(modeWrap);
+
+  // MA list
+  var maList = indicators.filter(function(x){return MA_TYPES.indexOf(x.type)>=0});
+
+  if (signalConfig.mode === 'cross') {
+    var grid = document.createElement('div');
+    Object.assign(grid.style, {display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'});
+    body.appendChild(grid);
+
+    var maAWrap = document.createElement('div');
+    maAWrap.appendChild(makeUiLabel('MA A (FAST)'));
+    var maASel = styleUiInput(document.createElement('select'));
+    maList.forEach(function(ind){
+      var o = document.createElement('option'); o.value=ind.id; o.textContent=formatIndicatorLabel(ind);
+      if (signalConfig.primaryIndicatorId===ind.id) o.selected=true; maASel.appendChild(o);
+    });
+    if (!maList.length) { var o = document.createElement('option'); o.value=''; o.textContent='(no MAs)'; maASel.appendChild(o); }
+    maASel.addEventListener('change', function() { signalConfig.primaryIndicatorId = maASel.value; refreshSignals(); });
+    if (maList.length && !signalConfig.primaryIndicatorId) { signalConfig.primaryIndicatorId = maList[0].id; maASel.value = maList[0].id; }
+    maAWrap.appendChild(maASel); grid.appendChild(maAWrap);
+
+    var maBWrap = document.createElement('div');
+    maBWrap.appendChild(makeUiLabel('MA B (SLOW)'));
+    var maBSel = styleUiInput(document.createElement('select'));
+    maList.forEach(function(ind){
+      var o = document.createElement('option'); o.value=ind.id; o.textContent=formatIndicatorLabel(ind);
+      if (signalConfig.secondaryIndicatorId===ind.id) o.selected=true; maBSel.appendChild(o);
+    });
+    if (!maList.length) { var ob = document.createElement('option'); ob.value=''; ob.textContent='(no MAs)'; maBSel.appendChild(ob); }
+    maBSel.addEventListener('change', function() { signalConfig.secondaryIndicatorId = maBSel.value; refreshSignals(); });
+    if (maList.length >= 2 && !signalConfig.secondaryIndicatorId) {
+      var pick = maList.find(function(x){return x.id !== signalConfig.primaryIndicatorId});
+      if (pick) { signalConfig.secondaryIndicatorId = pick.id; maBSel.value = pick.id; }
+    }
+    maBWrap.appendChild(maBSel); grid.appendChild(maBWrap);
+
+  } else {
+    var maAW = document.createElement('div');
+    maAW.appendChild(makeUiLabel('MA'));
+    var maASel2 = styleUiInput(document.createElement('select'));
+    maList.forEach(function(ind){
+      var o = document.createElement('option'); o.value=ind.id; o.textContent=formatIndicatorLabel(ind);
+      if (signalConfig.primaryIndicatorId===ind.id) o.selected=true; maASel2.appendChild(o);
+    });
+    if (!maList.length) { var o2 = document.createElement('option'); o2.value=''; o2.textContent='(no MAs)'; maASel2.appendChild(o2); }
+    maASel2.addEventListener('change', function() { signalConfig.primaryIndicatorId = maASel2.value; refreshSignals(); });
+    if (maList.length && !signalConfig.primaryIndicatorId) { signalConfig.primaryIndicatorId = maList[0].id; maASel2.value = maList[0].id; }
+    maAW.appendChild(maASel2); body.appendChild(maAW);
+
+    var consecWrap = document.createElement('div');
+    consecWrap.appendChild(makeUiLabel('CONSECUTIVE CANDLES'));
+    var consecInput = styleUiInput(document.createElement('input'));
+    consecInput.type='number'; consecInput.min='1'; consecInput.step='1'; consecInput.value=signalConfig.consecutiveBars;
+    consecInput.addEventListener('change', function() {
+      signalConfig.consecutiveBars = Math.max(1, parseInt(consecInput.value||'2',10));
+      refreshSignals();
+    });
+    consecWrap.appendChild(consecInput); body.appendChild(consecWrap);
+  }
+
+  // Candle direction filter
+  var dirRow = document.createElement('div');
+  Object.assign(dirRow.style, {display:'flex',alignItems:'center',gap:'8px',padding:'8px',
+    background:'#0f151c',border:'1px solid #1e2a38',borderRadius:'5px'});
+  var dirCb = document.createElement('input'); dirCb.type='checkbox'; dirCb.checked=signalConfig.requireCandleDir;
+  dirCb.style.accentColor='#00e5ff';
+  dirCb.addEventListener('change', function() { signalConfig.requireCandleDir = dirCb.checked; refreshSignals(); });
+  var dirLbl = document.createElement('span'); dirLbl.textContent = 'REQUIRE MATCHING CANDLE (BULL→BUY, BEAR→SELL)';
+  Object.assign(dirLbl.style, {fontFamily:"'Space Mono', monospace",fontSize:'0.54rem',
+    fontWeight:'700',letterSpacing:'0.08em',color:'#c8d8e8'});
+  dirRow.appendChild(dirCb); dirRow.appendChild(dirLbl);
+  body.appendChild(dirRow);
+
+  // ATR / SL TP section
+  var atrTitle = document.createElement('div'); atrTitle.textContent = 'ATR · DYNAMIC SL / TP';
+  Object.assign(atrTitle.style, {fontFamily:"'Space Mono', monospace",fontSize:'0.58rem',
+    fontWeight:'700',letterSpacing:'0.12em',color:'#ffab00',marginTop:'4px',
+    paddingTop:'10px',borderTop:'1px solid #1e2a38'});
+  body.appendChild(atrTitle);
+
+  var atrList = indicators.filter(function(x){return x.type==='ATR'});
+
+  var atrSelWrap = document.createElement('div');
+  atrSelWrap.appendChild(makeUiLabel('ATR INDICATOR'));
+  var atrSel = styleUiInput(document.createElement('select'));
+  var noneOpt = document.createElement('option'); noneOpt.value=''; noneOpt.textContent='(none — no SL/TP)';
+  atrSel.appendChild(noneOpt);
+  atrList.forEach(function(ind){
+    var o = document.createElement('option'); o.value=ind.id; o.textContent=formatIndicatorLabel(ind);
+    if (signalConfig.atrIndicatorId===ind.id) o.selected=true; atrSel.appendChild(o);
+  });
+  if (!signalConfig.atrIndicatorId && atrList.length) {
+    signalConfig.atrIndicatorId = atrList[0].id; atrSel.value = atrList[0].id;
+  }
+  atrSel.addEventListener('change', function() { signalConfig.atrIndicatorId = atrSel.value || null; refreshSignals(); });
+  atrSelWrap.appendChild(atrSel); body.appendChild(atrSelWrap);
+
+  var multGrid = document.createElement('div');
+  Object.assign(multGrid.style, {display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'});
+  body.appendChild(multGrid);
+
+  var slWrap = document.createElement('div');
+  slWrap.appendChild(makeUiLabel('SL × ATR'));
+  var slInput = styleUiInput(document.createElement('input'));
+  slInput.type='number'; slInput.step='0.1'; slInput.min='0.1'; slInput.value=signalConfig.slMult;
+  slInput.addEventListener('change', function() {
+    signalConfig.slMult = Math.max(0.1, Number(slInput.value)||1.5); refreshSignals();
+  });
+  slWrap.appendChild(slInput); multGrid.appendChild(slWrap);
+
+  var tpWrap = document.createElement('div');
+  tpWrap.appendChild(makeUiLabel('TP × ATR'));
+  var tpInput = styleUiInput(document.createElement('input'));
+  tpInput.type='number'; tpInput.step='0.1'; tpInput.min='0.1'; tpInput.value=signalConfig.tpMult;
+  tpInput.addEventListener('change', function() {
+    signalConfig.tpMult = Math.max(0.1, Number(tpInput.value)||3.0); refreshSignals();
+  });
+  tpWrap.appendChild(tpInput); multGrid.appendChild(tpWrap);
+
+  // Show SL/TP lines toggle
+  var linesRow = document.createElement('div');
+  Object.assign(linesRow.style, {display:'flex',alignItems:'center',gap:'8px',padding:'8px',
+    background:'#0f151c',border:'1px solid #1e2a38',borderRadius:'5px'});
+  var linesCb = document.createElement('input'); linesCb.type='checkbox'; linesCb.checked=signalConfig.showSlTpLines;
+  linesCb.style.accentColor='#00e5ff';
+  linesCb.addEventListener('change', function() { signalConfig.showSlTpLines = linesCb.checked; refreshSignals(); });
+  var linesLbl = document.createElement('span'); linesLbl.textContent = 'SHOW ENTRY/SL/TP PRICE LINES (LAST SIGNAL)';
+  Object.assign(linesLbl.style, {fontFamily:"'Space Mono', monospace",fontSize:'0.54rem',
+    fontWeight:'700',letterSpacing:'0.08em',color:'#c8d8e8'});
+  linesRow.appendChild(linesCb); linesRow.appendChild(linesLbl);
+  body.appendChild(linesRow);
+
+  // Signal preview readout
+  var preview = document.createElement('div');
+  Object.assign(preview.style, {marginTop:'4px',padding:'10px',background:'#0f151c',
+    border:'1px dashed #1e2a38',borderRadius:'6px',fontFamily:"'Space Mono', monospace",
+    fontSize:'0.56rem',color:'#8aa4b6',lineHeight:'1.6'});
+
+  var info = 'Signal count this window: ' + _signalMarkers.length + '\n';
+  if (_signalMarkers.length) {
+    var last = _signalMarkers[_signalMarkers.length-1];
+    info += 'Last: ' + last.text;
+  } else {
+    info += 'No signals fired in current window.';
+  }
+  preview.textContent = info;
+  preview.style.whiteSpace = 'pre-wrap';
+  body.appendChild(preview);
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -1332,7 +1752,7 @@ function renderIndicatorChips() {
       borderRadius:'999px',padding:'5px 8px',boxShadow:'0 4px 14px rgba(0,0,0,0.18)',
       backdropFilter:'blur(8px)',cursor:'pointer'});
     chip.addEventListener('click', function() {
-      selectedIndicatorId = ind.id; renderIndicatorChips(); renderIndicatorEditors(); setPanelOpen(true);
+      selectedIndicatorId = ind.id; renderIndicatorChips(); renderIndicatorEditors(); setIndPanelOpen(true);
     });
 
     var dot = document.createElement('span');
@@ -1365,7 +1785,7 @@ function renderIndicatorChips() {
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   UI — INDICATOR EDITORS (inline in panel)
+   UI — INDICATOR EDITORS
 ────────────────────────────────────────────────────────────────── */
 function renderIndicatorEditors() {
   editorSection.innerHTML = '';
@@ -1387,7 +1807,6 @@ function renderIndicatorEditors() {
       borderRadius:'8px',border:selectedIndicatorId===ind.id?'1px solid #00e5ff':'1px solid #1e2a38',
       background:selectedIndicatorId===ind.id?'rgba(0,229,255,0.04)':'#0f151c'});
 
-    // Header
     var head = document.createElement('div');
     Object.assign(head.style, {display:'flex',alignItems:'center',justifyContent:'space-between',gap:'8px',cursor:'pointer'});
     head.addEventListener('click', function() { selectedIndicatorId=ind.id; renderIndicatorEditors(); renderIndicatorChips(); });
@@ -1423,7 +1842,6 @@ function renderIndicatorEditors() {
     head.appendChild(left); head.appendChild(actions);
     card.appendChild(head);
 
-    // Fields grid
     var grid = document.createElement('div');
     Object.assign(grid.style, {display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px'});
     card.appendChild(grid);
@@ -1493,7 +1911,6 @@ function renderIndicatorEditors() {
       addField(grid2, 'SMOOTH D', dInput);
     }
 
-    // Level editors for RSI / Stoch RSI
     if (ind.type === 'RSI' || ind.type === 'Stoch RSI') {
       var lvlTitle = document.createElement('div'); lvlTitle.textContent = 'LEVELS';
       Object.assign(lvlTitle.style, {fontFamily:"'Space Mono', monospace",fontSize:'0.54rem',
@@ -1571,8 +1988,16 @@ function addIndicator(def) {
   indicators.push(ind);
   selectedIndicatorId = ind.id;
   ensureIndicatorSeries(ind);
-  if (!signalIndicatorId && ['EMA','HMA','SMA','WMA'].indexOf(ind.type) >= 0) signalIndicatorId = ind.id;
-  renderIndicatorChips(); renderSignalUi(); renderIndicatorEditors();
+
+  // Auto-bind signal indicators
+  if (MA_TYPES.indexOf(ind.type) >= 0) {
+    if (!signalConfig.primaryIndicatorId) signalConfig.primaryIndicatorId = ind.id;
+    else if (!signalConfig.secondaryIndicatorId && signalConfig.primaryIndicatorId !== ind.id) signalConfig.secondaryIndicatorId = ind.id;
+  }
+  if (ind.type === 'ATR' && !signalConfig.atrIndicatorId) signalConfig.atrIndicatorId = ind.id;
+
+  renderIndicatorChips(); renderSignalToggle(); renderIndicatorEditors();
+  if (sigPanelOpen) renderSignalPanel();
   invalidateIndicatorCache();
   requestAnimationFrame(function() {
     resizeAllCharts();
@@ -1587,15 +2012,25 @@ function removeIndicator(indicatorId) {
   removeIndicatorSeries(indicatorId);
   lastRenderedIndicatorRawValues.delete(indicatorId);
   lastRenderedComputed.delete(indicatorId);
-  if (signalIndicatorId === indicatorId) {
-    var next = indicators.find(function(ind){return ['EMA','HMA','SMA','WMA'].indexOf(ind.type)>=0});
-    signalIndicatorId = next ? next.id : null;
+
+  if (signalConfig.primaryIndicatorId === indicatorId) {
+    var nextMa = indicators.find(function(ind){return MA_TYPES.indexOf(ind.type)>=0});
+    signalConfig.primaryIndicatorId = nextMa ? nextMa.id : null;
+  }
+  if (signalConfig.secondaryIndicatorId === indicatorId) {
+    var nextMa2 = indicators.find(function(ind){return MA_TYPES.indexOf(ind.type)>=0 && ind.id !== signalConfig.primaryIndicatorId});
+    signalConfig.secondaryIndicatorId = nextMa2 ? nextMa2.id : null;
+  }
+  if (signalConfig.atrIndicatorId === indicatorId) {
+    var nextAtr = indicators.find(function(ind){return ind.type==='ATR'});
+    signalConfig.atrIndicatorId = nextAtr ? nextAtr.id : null;
   }
   if (selectedIndicatorId === indicatorId) {
     selectedIndicatorId = indicators.length ? indicators[0].id : null;
   }
   destroyUnusedPanes();
-  renderIndicatorChips(); renderSignalUi(); renderIndicatorEditors();
+  renderIndicatorChips(); renderSignalToggle(); renderIndicatorEditors();
+  if (sigPanelOpen) renderSignalPanel();
   invalidateIndicatorCache();
   requestAnimationFrame(function() {
     resizeAllCharts();
@@ -1630,12 +2065,20 @@ function updateIndicator(indicatorId, patch) {
     removeIndicatorSeries(indicatorId);
     destroyUnusedPanes();
     ensureIndicatorSeries(ind);
-    if (signalIndicatorId===indicatorId && ['EMA','HMA','SMA','WMA'].indexOf(ind.type)<0) {
-      var next = indicators.find(function(x){return ['EMA','HMA','SMA','WMA'].indexOf(x.type)>=0});
-      signalIndicatorId = next ? next.id : null;
-    } else if (!signalIndicatorId && ['EMA','HMA','SMA','WMA'].indexOf(ind.type)>=0) {
-      signalIndicatorId = indicatorId;
+    // re-bind signal slots if needed
+    if (signalConfig.primaryIndicatorId===indicatorId && MA_TYPES.indexOf(ind.type)<0) {
+      var nextMa = indicators.find(function(x){return MA_TYPES.indexOf(x.type)>=0});
+      signalConfig.primaryIndicatorId = nextMa ? nextMa.id : null;
     }
+    if (signalConfig.secondaryIndicatorId===indicatorId && MA_TYPES.indexOf(ind.type)<0) {
+      var nextMa2 = indicators.find(function(x){return MA_TYPES.indexOf(x.type)>=0 && x.id !== signalConfig.primaryIndicatorId});
+      signalConfig.secondaryIndicatorId = nextMa2 ? nextMa2.id : null;
+    }
+    if (signalConfig.atrIndicatorId===indicatorId && ind.type !== 'ATR') {
+      var nextAtr = indicators.find(function(x){return x.type==='ATR'});
+      signalConfig.atrIndicatorId = nextAtr ? nextAtr.id : null;
+    }
+    if (!signalConfig.atrIndicatorId && ind.type === 'ATR') signalConfig.atrIndicatorId = indicatorId;
   }
 
   var reg = ensureIndicatorSeries(ind);
@@ -1653,11 +2096,14 @@ function updateIndicator(indicatorId, patch) {
     reg.series[1].applyOptions({color:withAlpha(ind.obColor||'#ff3d5a',0.55),visible:ind.visible});
     reg.series[2].applyOptions({color:withAlpha(ind.osColor||'#00e676',0.55),visible:ind.visible});
     reg.series[3].applyOptions({color:withAlpha(ind.midColor||'#4a6070',0.45),visible:ind.visible&&ind.showMid!==false});
+  } else if (ind.type==='ATR') {
+    reg.series[0].applyOptions({color:ind.color,visible:ind.visible});
   } else {
     reg.series[0].applyOptions({color:ind.color,visible:ind.visible});
   }
 
-  renderIndicatorChips(); renderSignalUi(); renderIndicatorEditors();
+  renderIndicatorChips(); renderSignalToggle(); renderIndicatorEditors();
+  if (sigPanelOpen) renderSignalPanel();
   invalidateIndicatorCache();
   requestAnimationFrame(function() {
     resizeAllCharts();
@@ -1673,7 +2119,7 @@ addIndicatorButton.addEventListener('click', function() {
   if (type==='BB') def.stddev = Number(stddevInput.value||2);
   if (type==='Stoch RSI') { def.smoothK = Number(smoothKInput.value||3); def.smoothD = Number(smoothDInput.value||3); }
   addIndicator(def);
-  setPanelOpen(false);
+  setIndPanelOpen(false);
 });
 
 /* ──────────────────────────────────────────────────────────────────
@@ -1693,7 +2139,6 @@ async function loadRange(rangePt) {
     rebuildSourceCache();
     invalidateIndicatorCache();
 
-    // ── Immediate first render: load tail window ────────────
     var total = fullData.length;
     var winStart = Math.max(0, total - INITIAL_WINDOW_BARS);
     var winEnd = total;
@@ -1701,7 +2146,6 @@ async function loadRange(rangePt) {
     loadedWindow = { start: winStart, end: winEnd };
     loadedData = fullData.slice(winStart, winEnd);
 
-    // Set data immediately — no waiting
     candleSeries.setData(loadedData);
     volumeSeries.setData(volumeDataForLoadedWindow());
 
@@ -1713,24 +2157,18 @@ async function loadRange(rangePt) {
     var candlesEl = document.getElementById('statCandles');
     if (candlesEl) candlesEl.textContent = fullData.length.toLocaleString();
 
-    // Fit content immediately
     resizeAllCharts();
     mainChart.timeScale().fitContent();
 
-    // Rebuild backtest markers if any
-    if (fullBacktestTrades.length) {
-      rebuildBacktestMarkerCache(fullBacktestTrades);
-    }
+    if (fullBacktestTrades.length) rebuildBacktestMarkerCache(fullBacktestTrades);
     refreshAllMarkers();
 
-    // Render indicators + signals after 1 frame
     requestAnimationFrame(function() {
       renderIndicatorChips();
-      renderSignalUi();
+      renderSignalToggle();
       renderIndicatorEditors();
       scheduleIndicatorRender();
 
-      // Sync panes after another frame
       requestAnimationFrame(function() {
         var range = mainChart.timeScale().getVisibleRange();
         if (range) {
@@ -1746,13 +2184,12 @@ async function loadRange(rangePt) {
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   MAIN CHART HOVER / CROSSHAIR
+   MAIN CHART CROSSHAIR
 ────────────────────────────────────────────────────────────────── */
 mainChart.subscribeCrosshairMove(function(param) {
   var dp = param.seriesData ? param.seriesData.get(candleSeries) : null;
   if (dp && dp.open != null) updateSidebar(dp);
 
-  // Sync guide
   if (!param || !param.point || param.point.x == null || param.point.x < 0 || param.point.x > rootContainer.clientWidth) {
     syncGuide.style.display = 'none';
   } else {
@@ -1765,7 +2202,7 @@ mainChart.subscribeCrosshairMove(function(param) {
 });
 
 /* ──────────────────────────────────────────────────────────────────
-   RANGE BUTTONS (dynamic from /api/ranges/<symbol>)
+   RANGE BUTTONS
 ────────────────────────────────────────────────────────────────── */
 function buildIntervalButtons(symbol) {
   var group = document.getElementById('intervalGroup');
@@ -1811,6 +2248,7 @@ if (chartSymbolEl) {
     buildIntervalButtons(currentSymbol);
   });
 }
+
 /* ──────────────────────────────────────────────────────────────────
    RESIZE
 ────────────────────────────────────────────────────────────────── */
@@ -1826,7 +2264,7 @@ new ResizeObserver(function() {
 }).observe(rootContainer);
 
 /* ──────────────────────────────────────────────────────────────────
-   LIVE APPEND STUB
+   LIVE APPEND
 ────────────────────────────────────────────────────────────────── */
 function appendNewBar(bar) {
   var normalized = normalizeBars(fullData.length ? [fullData[fullData.length-1], bar] : [bar]);
@@ -1841,7 +2279,6 @@ function appendNewBar(bar) {
   datasetVersion += 1;
   invalidateIndicatorCache();
 
-  // If user is near right edge, extend window
   var vis = lastVisibleRange;
   var nearRight = vis ? binarySearchAtOrBefore(vis.to) >= fullData.length - 10 : true;
   if (nearRight) {
@@ -1860,7 +2297,7 @@ function appendNewBar(bar) {
 /* ──────────────────────────────────────────────────────────────────
    INIT
 ────────────────────────────────────────────────────────────────── */
-renderSignalUi();
+renderSignalToggle();
 renderIndicatorEditors();
 DEFAULT_INDICATORS.forEach(function(def) { addIndicator(def); });
 buildIntervalButtons(currentSymbol);

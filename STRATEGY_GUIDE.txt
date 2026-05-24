@@ -775,3 +775,5 @@ Recommended workflow
 10. Only then test larger datasets.
 
 End of guide.
+
+Gini Index so t

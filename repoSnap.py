@@ -10,7 +10,7 @@ import os
 # Not where this script file is located.
 ROOT = Path.cwd().resolve()
 
-CHUNK_COUNT = 5
+CHUNK_COUNT = 6
 OUTPUT_PREFIX = "repo_snapshot_part_"
 OUTPUT_SUFFIX = ".md"
 MAX_TOTAL_FILES = 2000              # hard cap
