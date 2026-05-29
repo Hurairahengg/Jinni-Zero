@@ -1,630 +1,442 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>JINNI TERMINAL</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css"/>
-  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<meta charset="UTF-8">
+<title>Streak Reversal — Trade Visualizer</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0e0e10; color: #e6e6e6;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; }
+  #topbar { background: #1a1a1d; padding: 10px 14px; border-bottom: 1px solid #2a2a2e;
+    display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  #topbar label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #999; }
+  #topbar input, #topbar select { background: #0e0e10; color: #e6e6e6;
+    border: 1px solid #333; padding: 5px 8px; border-radius: 3px; width: 100px; }
+  #topbar input[type=file] { width: auto; }
+  #topbar button { background: #4caf50; color: #0e0e10; border: 0; padding: 8px 18px;
+    border-radius: 3px; font-weight: 700; cursor: pointer; }
+  #topbar button:hover { background: #5dd462; }
+  #main { display: flex; height: calc(100vh - 92px); }
+  #chart-wrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #chart { flex: 1; min-height: 0; }
+  #equity-chart { height: 180px; border-top: 1px solid #2a2a2e; }
+  #side { width: 340px; background: #131316; border-left: 1px solid #2a2a2e;
+    display: flex; flex-direction: column; overflow: hidden; }
+  #stats { padding: 12px 14px; border-bottom: 1px solid #2a2a2e;
+    font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.6; }
+  #stats .row { display: flex; justify-content: space-between; }
+  #stats .row span:first-child { color: #888; }
+  #stats h3 { margin: 0 0 8px 0; font-size: 13px; color: #4caf50; }
+  #trade-list { flex: 1; overflow-y: auto; }
+  .trade-row { padding: 8px 14px; border-bottom: 1px solid #1f1f23; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; }
+  .trade-row:hover { background: #1c1c20; }
+  .trade-row.active { background: #2a2a3a; border-left: 3px solid #42a5f5; padding-left: 11px; }
+  .trade-row .dir { width: 18px; font-weight: 700; }
+  .trade-row .dir.long { color: #4caf50; }
+  .trade-row .dir.short { color: #ef5350; }
+  .trade-row .pnl { font-family: ui-monospace, monospace; font-weight: 600; }
+  .trade-row .pnl.win { color: #4caf50; }
+  .trade-row .pnl.loss { color: #ef5350; }
+  .trade-row .meta { color: #777; font-size: 10.5px; }
+  #status { padding: 6px 14px; color: #888; font-size: 11px;
+    background: #1a1a1d; border-top: 1px solid #2a2a2e; }
+</style>
 </head>
 <body>
-  <div class="scanline"></div>
 
-  <!-- ═══ HEADER ══════════════════════════════════════════════════════ -->
-  <header class="header">
-    <div class="header-left">
-      <div class="logo">
-        <span class="logo-bracket">[</span>
-        <span class="logo-text">JINNI<span class="logo-accent">ZERO</span></span>
-        <span class="logo-bracket">]</span>
-      </div>
-      <nav class="tab-nav">
-        <button class="tab-btn active" data-tab="chart"><span class="tab-icon">▦</span>CHART</button>
-        <button class="tab-btn" data-tab="backtest"><span class="tab-icon">◈</span>BACKTEST</button>
-      </nav>
-    </div>
+<div id="topbar">
+  <label>Data file <input type="file" id="file-input" accept=".json"></label>
+  <label>Streak <input type="number" id="streak" value="5" min="2"></label>
+  <label>TP after <input type="number" id="tp" value="2" min="1"></label>
+  <label>SL (pts) <input type="number" id="sl" value="16" step="0.5"></label>
+  <label>Slippage <input type="number" id="slip" value="0.3" step="0.1"></label>
+  <label>Comm /lot <input type="number" id="comm" value="0.8" step="0.1"></label>
+  <label>Mode
+    <select id="mode">
+      <option value="flat">Flat risk</option>
+      <option value="scaling">Scaling</option>
+    </select>
+  </label>
+  <label>Flat $ <input type="number" id="flat" value="10" step="1"></label>
+  <label>Start bal <input type="number" id="start-bal" value="1000" step="100"></label>
+  <label>Risk/$100 <input type="number" id="risk100" value="1" step="0.1"></label>
+  <label>TP fill
+    <select id="tpfill">
+      <option value="close">Bar close (Python parity)</option>
+      <option value="nextopen">Next bar open (live-realistic)</option>
+    </select>
+  </label>
+  <button id="run">Run Backtest</button>
+</div>
 
-    <div class="header-right" id="chartHeaderRight">
-      <div class="ticker-info">
-        <select class="symbol-select" id="chartSymbol">
-          <option value="NQ" selected>NQ</option>
-          <option value="SPX">SPX</option>
-          <option value="XAUUSD">XAUUSD</option>
-          <option value="EURUSD">EURUSD</option>
-          <option value="USDJPY">USDJPY</option>
-          <option value="GBPUSD">GBPUSD</option>
-          <option value="AUDUSD">AUDUSD</option>
-          <option value="USDCAD">USDCAD</option>
-        </select>
-        <span class="ticker-price" id="tickerPrice">—</span>
-        <span class="ticker-change" id="tickerChange">—</span>
-      </div>
+<div id="main">
+  <div id="chart-wrap">
+    <div id="chart"></div>
+    <div id="equity-chart"></div>
+  </div>
+  <div id="side">
+    <div id="stats"><h3>STATS</h3><div class="row"><span>load data + click Run</span><span></span></div></div>
+    <div id="trade-list"></div>
+  </div>
+</div>
+<div id="status">no data loaded</div>
 
-      <div class="interval-group" id="intervalGroup"></div>
+<script>
+// =========================================================
+// STATE
+// =========================================================
+let bars = [];
+let chartTimes = [];
+let result = null;
+let activeTradeIdx = -1;
 
-      <div class="status-dot-wrap">
-        <span class="status-dot"></span>
-        <span class="status-label">LIVE</span>
-      </div>
-    </div>
+let entryLineSeries = null;
+let slLineSeries = null;
+let tradeSegSeries = null;
 
-    <div class="header-right" id="backtestHeaderRight" style="display:none;">
-      <span class="bt-header-label">STRATEGY BACKTESTER</span>
-      <div style="display:flex; gap:6px; align-items:center; margin-left:16px;">
-        <span style="font-size:0.55rem; letter-spacing:0.12em; color:var(--text-dim); font-family:var(--mono); font-weight:700;">GRAPH STEP</span>
-        <select id="bt_graphStep" class="bt-select bt-select-sm" style="width:60px; padding:4px 6px; font-size:0.65rem;">
-          <option value="1" selected>1</option>
-          <option value="2">2</option>
-          <option value="4">4</option>
-          <option value="8">8</option>
-          <option value="16">16</option>
-          <option value="32">32</option>
-        </select>
-      </div>
-    </div>
-  </header>
+// =========================================================
+// CHARTS
+// =========================================================
+const chartEl = document.getElementById('chart');
+const equityEl = document.getElementById('equity-chart');
 
-  <!-- ═══ CHART TAB ════════════════════════════════════════════════════ -->
-  <main class="layout tab-panel active" id="tabChart">
-    <aside class="sidebar">
-      <div class="sidebar-block"><div class="sidebar-label">OPEN</div><div class="sidebar-value" id="statOpen">—</div></div>
-      <div class="sidebar-block"><div class="sidebar-label">HIGH</div><div class="sidebar-value bull" id="statHigh">—</div></div>
-      <div class="sidebar-block"><div class="sidebar-label">LOW</div><div class="sidebar-value bear" id="statLow">—</div></div>
-      <div class="sidebar-block"><div class="sidebar-label">CLOSE</div><div class="sidebar-value" id="statClose">—</div></div>
-      <div class="sidebar-divider"></div>
-      <div class="sidebar-block"><div class="sidebar-label">VOLUME</div><div class="sidebar-value" id="statVolume">—</div></div>
-      <div class="sidebar-block"><div class="sidebar-label">CHANGE</div><div class="sidebar-value" id="statChange">—</div></div>
-      <div class="sidebar-divider"></div>
-      <div class="sidebar-block"><div class="sidebar-label">CANDLES</div><div class="sidebar-value" id="statCandles">—</div></div>
-    </aside>
+const baseChartOpts = {
+  layout: { background: { color: '#0e0e10' }, textColor: '#bbb' },
+  grid: { vertLines: { color: '#1c1c20' }, horzLines: { color: '#1c1c20' } },
+  rightPriceScale: { borderColor: '#2a2a2e' },
+  timeScale: { borderColor: '#2a2a2e', timeVisible: false, secondsVisible: false },
+  crosshair: { mode: 0 },
+};
 
-    <section class="chart-area">
-      <div class="chart-container" id="chartContainer"></div>
-      <div class="chart-footer">
-        <span class="chart-hint">↕ scroll to zoom · drag to pan · hover for OHLC</span>
-        <span class="chart-powered">powered by Lightweight Charts™</span>
-      </div>
-    </section>
-  </main>
+const chart = LightweightCharts.createChart(chartEl, baseChartOpts);
+const candleSeries = chart.addCandlestickSeries({
+  upColor: '#4caf50', downColor: '#ef5350',
+  borderUpColor: '#4caf50', borderDownColor: '#ef5350',
+  wickUpColor: '#4caf50', wickDownColor: '#ef5350',
+});
 
-  <!-- ═══ BACKTEST TAB ═════════════════════════════════════════════════ -->
-  <main class="layout tab-panel" id="tabBacktest" style="display:none;">
-    <div class="bt-root">
-      <!-- ── LEFT CONFIG ──────────────────────────────────────────── -->
-      <aside class="bt-config-panel">
+const equityChart = LightweightCharts.createChart(equityEl, baseChartOpts);
+const equitySeries = equityChart.addLineSeries({ color: '#4caf50', lineWidth: 2 });
 
-        <!-- MODE -->
-        <div class="bt-section">
-          <div class="bt-section-title">MODE</div>
-          <div class="bt-field">
-            <label class="bt-label">Backtest Mode</label>
-            <select class="bt-select" id="bt_mode">
-              <option value="manual" selected>Manual Mode (Legacy)</option>
-              <option value="strategy">Load Strategy Mode</option>
-            </select>
-          </div>
-          <div class="bt-field">
-            <label class="bt-label">Point Value</label>
-            <input class="bt-input" type="number" id="bt_pointValue"
-                  value="1" min="0.01" max="10000" step="0.01"/>
-            <span class="bt-hint" id="bt_pvHint">Instrument tick multiplier (usually 1)</span>
-          </div>
-          <div class="bt-field">
-            <label class="bt-label">Dollar Per Point (per lot)</label>
-            <input class="bt-input" type="number" id="bt_dollarPerPoint"
-                  value="1" min="0.0001" max="1000000" step="0.01"/>
-            <div class="bt-toggle-label" id="bt_dppHint">1pt move × 1.00 lot = $1.00 P&L</div>
-          </div>
-          <div class="bt-toggle-label">
-            Manual Mode keeps your existing legacy controls. Load Strategy Mode auto-loads Python strategy schemas + engine settings.
-          </div>
+window.addEventListener('resize', () => {
+  chart.resize(chartEl.clientWidth, chartEl.clientHeight);
+  equityChart.resize(equityEl.clientWidth, equityEl.clientHeight);
+});
+
+// =========================================================
+// FILE LOAD
+// =========================================================
+document.getElementById('file-input').addEventListener('change', (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const json = JSON.parse(e.target.result);
+      if (!Array.isArray(json)) throw new Error('expected array of bars');
+      bars = json.map(c => ({
+        open: +c.open, high: +c.high, low: +c.low, close: +c.close,
+      }));
+      const base = 1577836800; // 2020-01-01
+      chartTimes = bars.map((_, i) => base + i * 60);
+      const candleData = bars.map((b, i) => ({ time: chartTimes[i], ...b }));
+      candleSeries.setData(candleData);
+      candleSeries.setMarkers([]);
+      clearOverlays();
+      equitySeries.setData([]);
+      chart.timeScale().fitContent();
+      document.getElementById('status').textContent =
+        `loaded ${bars.length.toLocaleString()} bars from ${file.name}`;
+    } catch (err) {
+      document.getElementById('status').textContent = `load error: ${err.message}`;
+    }
+  };
+  reader.readAsText(file);
+});
+
+// =========================================================
+// STRATEGY — direct port of your Python (1:1)
+// =========================================================
+function direction(c) {
+  if (c.close > c.open) return 1;
+  if (c.close < c.open) return -1;
+  return 0;
+}
+
+function runBacktest(p) {
+  const directions = bars.map(direction);
+  const equity = [p.scalingEnabled ? p.startingBalance : 0];
+  const trades = [];
+  const tailGuard = p.tpFill === 'nextopen' ? (p.tpCloseAfter + 3) : (p.tpCloseAfter + 2);
+
+  let i = p.streakSize;
+  while (i < bars.length - tailGuard) {
+    const streakDir = directions[i - p.streakSize];
+    if (streakDir === 0) { i++; continue; }
+
+    let valid = true;
+    for (let j = i - p.streakSize; j < i; j++) {
+      if (directions[j] !== streakDir) { valid = false; break; }
+    }
+    if (!valid) { i++; continue; }
+
+    const reversalDir = directions[i];
+    if (reversalDir !== -streakDir) { i++; continue; }
+
+    const balanceNow = equity[equity.length - 1];
+    const riskThisTrade = p.scalingEnabled
+      ? (balanceNow / 100) * p.riskPer100
+      : p.flatRisk;
+    if (riskThisTrade <= 0) break;
+
+    const rawLots = riskThisTrade / p.fixedSL;
+    const lots = Math.max(0.01, Math.min(600, rawLots));
+
+    const entryIdx = i + 1;
+    const rawEntry = bars[entryIdx].open;
+    const entryPrice = reversalDir === 1 ? rawEntry + p.slippage : rawEntry - p.slippage;
+    const slPrice = reversalDir === 1 ? entryPrice - p.fixedSL : entryPrice + p.fixedSL;
+
+    const tpIdx = entryIdx + p.tpCloseAfter;
+    let hitSL = false, exitPrice = null, exitIdx = null;
+    let mfePoints = 0, maePoints = 0;
+
+    for (let k = entryIdx; k <= tpIdx; k++) {
+      const bar = bars[k];
+      const fav = reversalDir === 1 ? bar.high - entryPrice : entryPrice - bar.low;
+      const adv = reversalDir === 1 ? entryPrice - bar.low : bar.high - entryPrice;
+      if (fav > mfePoints) mfePoints = fav;
+      if (adv > maePoints) maePoints = adv;
+
+      if (reversalDir === 1) {
+        if (bar.open <= slPrice) { exitPrice = bar.open - p.slippage; hitSL = true; exitIdx = k; break; }
+        if (bar.low  <= slPrice) { exitPrice = slPrice  - p.slippage; hitSL = true; exitIdx = k; break; }
+      } else {
+        if (bar.open >= slPrice) { exitPrice = bar.open + p.slippage; hitSL = true; exitIdx = k; break; }
+        if (bar.high >= slPrice) { exitPrice = slPrice  + p.slippage; hitSL = true; exitIdx = k; break; }
+      }
+    }
+
+    if (!hitSL) {
+      if (p.tpFill === 'nextopen') {
+        const exitBarIdx = tpIdx + 1;
+        const rawTp = bars[exitBarIdx].open;
+        exitPrice = reversalDir === 1 ? rawTp - p.slippage : rawTp + p.slippage;
+        exitIdx = exitBarIdx;
+      } else {
+        const rawTp = bars[tpIdx].close;
+        exitPrice = reversalDir === 1 ? rawTp - p.slippage : rawTp + p.slippage;
+        exitIdx = tpIdx;
+      }
+    }
+
+    const pnlPoints = reversalDir === 1 ? exitPrice - entryPrice : entryPrice - exitPrice;
+    const grossPnl = pnlPoints * lots;
+    const commCost = lots * p.commission;
+    const netPnl = grossPnl - commCost;
+
+    equity.push(equity[equity.length - 1] + netPnl);
+    trades.push({
+      entryIdx, exitIdx, dir: reversalDir,
+      entry: entryPrice, exit: exitPrice, sl: slPrice,
+      pnlPoints, netPnl, grossPnl, commission: commCost, lots,
+      barsHeld: exitIdx - entryIdx + 1,
+      hitSL, mfePoints, maePoints,
+      rMultiple: riskThisTrade > 0 ? netPnl / riskThisTrade : 0,
+      riskUsed: riskThisTrade,
+      balanceAfter: equity[equity.length - 1],
+    });
+    i++;
+  }
+  return { trades, equity };
+}
+
+// =========================================================
+// OVERLAYS / MARKERS / STATS / LIST
+// =========================================================
+function clearOverlays() {
+  if (entryLineSeries) { chart.removeSeries(entryLineSeries); entryLineSeries = null; }
+  if (slLineSeries)    { chart.removeSeries(slLineSeries);    slLineSeries = null; }
+  if (tradeSegSeries)  { chart.removeSeries(tradeSegSeries);  tradeSegSeries = null; }
+}
+
+function applyMarkers(trades) {
+  const markers = [];
+  for (const t of trades) {
+    const isLong = t.dir === 1;
+    markers.push({
+      time: chartTimes[t.entryIdx],
+      position: isLong ? 'belowBar' : 'aboveBar',
+      color: isLong ? '#4caf50' : '#ef5350',
+      shape: isLong ? 'arrowUp' : 'arrowDown',
+      text: isLong ? 'L' : 'S',
+    });
+    markers.push({
+      time: chartTimes[t.exitIdx],
+      position: t.netPnl > 0 ? 'aboveBar' : 'belowBar',
+      color: t.netPnl > 0 ? '#26c6da' : '#ff9800',
+      shape: t.hitSL ? 'square' : 'circle',
+      text: (t.netPnl >= 0 ? '+' : '') + t.netPnl.toFixed(0),
+    });
+  }
+  markers.sort((a, b) => a.time - b.time);
+  candleSeries.setMarkers(markers);
+}
+
+function focusTrade(idx) {
+  clearOverlays();
+  if (idx < 0 || !result) return;
+  const t = result.trades[idx];
+
+  const lineCommon = {
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  };
+
+  entryLineSeries = chart.addLineSeries({
+    color: '#42a5f5', lineWidth: 2, lineStyle: 2, ...lineCommon,
+  });
+  entryLineSeries.setData([
+    { time: chartTimes[t.entryIdx], value: t.entry },
+    { time: chartTimes[t.exitIdx],  value: t.entry },
+  ]);
+
+  slLineSeries = chart.addLineSeries({
+    color: '#ef5350', lineWidth: 2, lineStyle: 2, ...lineCommon,
+  });
+  slLineSeries.setData([
+    { time: chartTimes[t.entryIdx], value: t.sl },
+    { time: chartTimes[t.exitIdx],  value: t.sl },
+  ]);
+
+  tradeSegSeries = chart.addLineSeries({
+    color: t.netPnl > 0 ? '#4caf50' : '#ef5350',
+    lineWidth: 3, ...lineCommon,
+  });
+  tradeSegSeries.setData([
+    { time: chartTimes[t.entryIdx], value: t.entry },
+    { time: chartTimes[t.exitIdx],  value: t.exit },
+  ]);
+
+  const pad = 40;
+  const fromIdx = Math.max(0, t.entryIdx - pad);
+  const toIdx   = Math.min(bars.length - 1, t.exitIdx + pad);
+  chart.timeScale().setVisibleRange({
+    from: chartTimes[fromIdx], to: chartTimes[toIdx],
+  });
+
+  document.querySelectorAll('.trade-row').forEach(r => r.classList.remove('active'));
+  const row = document.querySelector(`.trade-row[data-idx="${idx}"]`);
+  if (row) { row.classList.add('active'); row.scrollIntoView({ block: 'nearest' }); }
+  activeTradeIdx = idx;
+}
+
+function renderStats(res) {
+  const t = res.trades;
+  if (t.length === 0) {
+    document.getElementById('stats').innerHTML =
+      '<h3>STATS</h3><div class="row"><span>no trades</span><span></span></div>';
+    return;
+  }
+  const wins = t.filter(x => x.netPnl > 0).length;
+  const losses = t.length - wins;
+  const net = t.reduce((s, x) => s + x.netPnl, 0);
+  const grossW = t.filter(x => x.netPnl > 0).reduce((s, x) => s + x.netPnl, 0);
+  const grossL = t.filter(x => x.netPnl <= 0).reduce((s, x) => s + Math.abs(x.netPnl), 0);
+  const pf = grossL > 0 ? grossW / grossL : 0;
+  const wr = wins / t.length * 100;
+  const exp = net / t.length;
+  const slExits = t.filter(x => x.hitSL).length;
+  const longs = t.filter(x => x.dir === 1).length;
+  const shorts = t.length - longs;
+  const finalBal = res.equity[res.equity.length - 1];
+
+  // max DD
+  let peak = res.equity[0], maxDD = 0;
+  for (const v of res.equity) {
+    if (v > peak) peak = v;
+    if (peak - v > maxDD) maxDD = peak - v;
+  }
+
+  const rows = [
+    ['Trades', t.length],
+    ['Wins / Losses', `${wins} / ${losses}`],
+    ['Winrate', `${wr.toFixed(2)}%`],
+    ['Net PnL', `$${net.toFixed(2)}`],
+    ['Profit factor', pf.toFixed(2)],
+    ['Expectancy', `$${exp.toFixed(2)}`],
+    ['SL / TP exits', `${slExits} / ${t.length - slExits}`],
+    ['Long / Short', `${longs} / ${shorts}`],
+    ['Max drawdown', `$${maxDD.toFixed(2)}`],
+    ['Final balance', `$${finalBal.toFixed(2)}`],
+  ];
+  document.getElementById('stats').innerHTML =
+    '<h3>STATS</h3>' +
+    rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
+}
+
+function renderTradeList(trades) {
+  const wrap = document.getElementById('trade-list');
+  wrap.innerHTML = trades.map((t, i) => {
+    const dirCls = t.dir === 1 ? 'long' : 'short';
+    const pnlCls = t.netPnl > 0 ? 'win' : 'loss';
+    return `
+      <div class="trade-row" data-idx="${i}">
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span class="dir ${dirCls}">${t.dir === 1 ? 'L' : 'S'}</span>
+          <span>#${i+1}</span>
+          <span class="meta">${t.entryIdx}→${t.exitIdx} · ${t.barsHeld}b · ${t.hitSL ? 'SL' : 'TP'}</span>
         </div>
+        <span class="pnl ${pnlCls}">${t.netPnl >= 0 ? '+' : ''}${t.netPnl.toFixed(2)}</span>
+      </div>`;
+  }).join('');
+  wrap.querySelectorAll('.trade-row').forEach(row => {
+    row.addEventListener('click', () => focusTrade(parseInt(row.dataset.idx)));
+  });
+}
 
-        <!-- shared -->
-        <div class="bt-section">
-          <div class="bt-section-title">DATA SOURCE</div>
+function renderEquity(res) {
+  const base = 1577836800;
+  const data = res.equity.map((v, i) => ({ time: base + i * 60, value: v }));
+  equitySeries.setData(data);
+  equityChart.timeScale().fitContent();
+}
 
-          <div class="bt-field">
-            <label class="bt-label">Symbol</label>
-            <select class="bt-select" id="bt_symbol">
-              <option value="NQ" selected>NQ</option>
-              <option value="SPX">SPX</option>
-              <option value="XAUUSD">XAUUSD</option>
-              <option value="EURUSD">EURUSD</option>
-              <option value="USDJPY">USDJPY</option>
-              <option value="GBPUSD">GBPUSD</option>
-              <option value="AUDUSD">AUDUSD</option>
-              <option value="USDCAD">USDCAD</option>
-            </select>
-          </div>
+// =========================================================
+// RUN
+// =========================================================
+document.getElementById('run').addEventListener('click', () => {
+  if (bars.length === 0) {
+    document.getElementById('status').textContent = 'load a data file first';
+    return;
+  }
+  const params = {
+    streakSize:      +document.getElementById('streak').value,
+    tpCloseAfter:    +document.getElementById('tp').value,
+    fixedSL:         +document.getElementById('sl').value,
+    slippage:        +document.getElementById('slip').value,
+    commission:      +document.getElementById('comm').value,
+    scalingEnabled:  document.getElementById('mode').value === 'scaling',
+    startingBalance: +document.getElementById('start-bal').value,
+    riskPer100:      +document.getElementById('risk100').value,
+    flatRisk:        +document.getElementById('flat').value,
+    tpFill:          document.getElementById('tpfill').value,
+  };
+  const t0 = performance.now();
+  result = runBacktest(params);
+  const t1 = performance.now();
 
-          <div class="bt-field">
-            <label class="bt-label">Range Bar Size</label>
-            <select class="bt-select" id="bt_range"></select>
-          </div>
+  clearOverlays();
+  applyMarkers(result.trades);
+  renderStats(result);
+  renderTradeList(result.trades);
+  renderEquity(result);
+  chart.timeScale().fitContent();
 
-          <div class="bt-field">
-            <label class="bt-label">Data Slicing</label>
-            <select class="bt-select" id="bt_sliceMode">
-              <option value="bar_count" selected>Bar Count</option>
-              <option value="date_range">Date Range</option>
-            </select>
-          </div>
-
-          <div id="bt_barRangeWrap">
-            <div class="bt-field">
-              <label class="bt-label">Backtest Range</label>
-              <select class="bt-select" id="bt_barRange">
-                <option value="500">Last 500 bars</option>
-                <option value="1000" selected>Last 1000 bars</option>
-                <option value="2500">Last 2500 bars</option>
-                <option value="5000">Last 5000 bars</option>
-                <option value="0">Full dataset</option>
-              </select>
-            </div>
-          </div>
-
-          <div id="bt_dateRangeWrap" style="display:none;">
-            <div class="bt-field">
-              <label class="bt-label">Start Date</label>
-              <input type="datetime-local" class="bt-input" id="bt_startDate"/>
-            </div>
-            <div class="bt-field">
-              <label class="bt-label">End Date</label>
-              <input type="datetime-local" class="bt-input" id="bt_endDate"/>
-            </div>
-          </div>
-
-          <div class="bt-field">
-            <label class="bt-label">Starting Capital ($)</label>
-            <input class="bt-input" type="number" id="bt_startingCapital" value="10000" min="0" step="500"/>
-          </div>
-          
-          <div class="bt-field">
-            <label class="bt-label">Position Sizing</label>
-            <select class="bt-select" id="bt_sizingMode">
-              <option value="fixed" selected>Fixed Lot</option>
-              <option value="risk_pct">Risk %</option>
-              <option value="risk_per_trade">Risk Per Trade</option>
-            </select>
-          </div>
-
-          <div id="bt_fixedLotWrap">
-            <div class="bt-field">
-              <label class="bt-label">Lot Size</label>
-              <input class="bt-input" type="number" id="bt_lotSize" value="1.0" min="0.01" step="0.01"/>
-              <div class="bt-toggle-label" id="bt_lotHint">1 pt = $1.00</div>
-            </div>
-          </div>
-
-          <div id="bt_riskPctWrap" style="display:none;">
-            <div class="bt-field">
-              <label class="bt-label">Risk Per Trade (%)</label>
-              <input class="bt-input" type="number" id="bt_riskPct" value="1.0" min="0.01" max="100" step="0.1"/>
-              <div class="bt-toggle-label" id="bt_riskHint">
-                $1,000 balance × 1% = $10 risk per trade
-              </div>
-            </div>
-          </div>
-          <div id="bt_riskPerTradeWrap" style="display:none;">
-            <div class="bt-field">
-              <label class="bt-label">Base Risk ($)</label>
-              <input class="bt-input" type="number" id="bt_fixedRisk" value="10" min="0.01" step="0.5"/>
-              <div class="bt-toggle-label" id="bt_fixedRiskHint">
-                Every trade risks exactly $10.00 (requires SL)
-              </div>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">Scaling Mode</label>
-              <div class="bt-toggle-row">
-                <label class="bt-toggle"><input type="checkbox" id="bt_scalingEnabled"/><span class="bt-toggle-slider"></span></label>
-                <span class="bt-toggle-label">Scale risk with equity growth</span>
-              </div>
-            </div>
-
-            <div id="bt_scalingWrap" style="display:none;">
-              <div class="bt-field">
-                <label class="bt-label">For Every ($)</label>
-                <input class="bt-input" type="number" id="bt_scalingPer" value="100" min="1" step="10"/>
-              </div>
-              <div class="bt-field">
-                <label class="bt-label">Risk ($)</label>
-                <input class="bt-input" type="number" id="bt_scalingRisk" value="1" min="0.01" step="0.25"/>
-              </div>
-              <div class="bt-toggle-label" id="bt_scalingHint">
-                $10,000 bal ÷ $100 × $1.00 = $100.00 risk/trade
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- MANUAL MODE ONLY -->
-        <div class="bt-section bt-manual-only">
-          <div class="bt-section-title">MOVING AVERAGES</div>
-          <div class="bt-ma-row" id="bt_ma_0">
-            <select class="bt-select bt-select-sm" data-ma-type>
-              <option value="EMA">EMA</option><option value="HMA" selected>HMA</option>
-              <option value="SMA">SMA</option><option value="WMA">WMA</option>
-            </select>
-            <input class="bt-input bt-input-sm" type="number" data-ma-period value="21" min="2" max="500"/>
-            <button class="bt-icon-btn bt-remove-ma" title="Remove">✕</button>
-          </div>
-          <button class="bt-add-btn" id="bt_addMa">+ ADD MA</button>
-        </div>
-
-        <div class="bt-section bt-manual-only">
-          <div class="bt-section-title">ENTRY LOGIC</div>
-          <div class="bt-field">
-            <label class="bt-label">Entry Condition</label>
-            <select class="bt-select" id="bt_entry">
-              <option value="above_all_mas">Price above ALL MAs (2-bar confirm)</option>
-              <option value="ma_cross">MA Cross (fast × slow)</option>
-              <option value="trend_filter">Trend Filter (close vs longest MA)</option>
-            </select>
-          </div>
-
-          <div class="bt-field">
-            <label class="bt-label">Require Candle Direction Confirmation</label>
-            <div class="bt-toggle-row">
-              <label class="bt-toggle"><input type="checkbox" id="bt_candleConfirm" checked/><span class="bt-toggle-slider"></span></label>
-              <span class="bt-toggle-label">Entry candle must match trade direction</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="bt-section bt-manual-only">
-          <div class="bt-section-title">TRADE GATING</div>
-          <div class="bt-field">
-            <label class="bt-label">One Trade Per MA</label>
-            <div class="bt-toggle-row">
-              <label class="bt-toggle"><input type="checkbox" id="bt_gatingEnabled"/><span class="bt-toggle-slider"></span></label>
-              <span class="bt-toggle-label">Lock direction until price crosses gating MA</span>
-            </div>
-          </div>
-
-          <div id="bt_gating_wrap" style="display:none;">
-            <div class="bt-field">
-              <label class="bt-label">Gating MA Type</label>
-              <select class="bt-select" id="bt_gating_ma_type">
-                <option value="HMA" selected>HMA</option>
-                <option value="EMA">EMA</option>
-                <option value="SMA">SMA</option>
-              </select>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">Gating MA Length</label>
-              <input class="bt-input" type="number" id="bt_gating_ma_length" value="21" min="2" max="500"/>
-            </div>
-          </div>
-        </div>
-
-        <div class="bt-section bt-manual-only">
-          <div class="bt-section-title">STOP LOSS</div>
-          <div class="bt-field">
-            <label class="bt-label">SL Mode</label>
-            <div class="bt-radio-group">
-              <label class="bt-radio"><input type="radio" name="sl_mode" value="fixed" checked/><span>Fixed pts</span></label>
-              <label class="bt-radio"><input type="radio" name="sl_mode" value="ma_cross"/><span>MA Cross</span></label>
-              <label class="bt-radio"><input type="radio" name="sl_mode" value="ma_snapshot"/><span>MA Snapshot</span></label>
-            </div>
-          </div>
-
-          <div class="bt-field" id="bt_sl_fixed_wrap">
-            <label class="bt-label">SL Size (points)</label>
-            <input class="bt-input" type="number" id="bt_sl_fixed" value="8" min="0.25" step="0.25"/>
-          </div>
-
-          <div id="bt_sl_ma_wrap" style="display:none;">
-            <div class="bt-field">
-              <label class="bt-label">SL MA Type</label>
-              <select class="bt-select" id="bt_sl_ma_type">
-                <option value="EMA" selected>EMA</option>
-                <option value="HMA">HMA</option>
-                <option value="SMA">SMA</option>
-              </select>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">SL MA Length</label>
-              <input class="bt-input" type="number" id="bt_sl_ma_length" value="50" min="2" max="500"/>
-            </div>
-          </div>
-
-          <div class="bt-field">
-            <label class="bt-label">Ambiguous Bar (SL+TP hit)</label>
-            <select class="bt-select" id="bt_ambiguousMode">
-              <option value="conservative" selected>Conservative (SL first)</option>
-              <option value="optimistic">Optimistic (TP first)</option>
-              <option value="nearest_to_open">Nearest to Open</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="bt-section bt-manual-only">
-          <div class="bt-section-title">TAKE PROFIT</div>
-          <div class="bt-field">
-            <label class="bt-label">TP Mode</label>
-            <div class="bt-radio-group">
-              <label class="bt-radio"><input type="radio" name="tp_mode" value="r_multiple" checked/><span>R Multiple</span></label>
-              <label class="bt-radio"><input type="radio" name="tp_mode" value="ma_cross"/><span>MA Cross</span></label>
-            </div>
-          </div>
-
-          <div class="bt-field" id="bt_tp_r_wrap">
-            <label class="bt-label">R Multiple</label>
-            <div class="bt-r-group">
-              <button class="bt-r-btn active" data-r="2">2R</button>
-              <button class="bt-r-btn" data-r="3">3R</button>
-              <button class="bt-r-btn" data-r="4">4R</button>
-              <button class="bt-r-btn" data-r="5">5R</button>
-            </div>
-          </div>
-
-          <div id="bt_tp_ma_wrap" style="display:none;">
-            <div class="bt-field">
-              <label class="bt-label">TP MA Type</label>
-              <select class="bt-select" id="bt_tp_ma_type">
-                <option value="EMA" selected>EMA</option>
-                <option value="HMA">HMA</option>
-                <option value="SMA">SMA</option>
-              </select>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">TP MA Length</label>
-              <input class="bt-input" type="number" id="bt_tp_ma_length" value="9" min="2" max="500"/>
-            </div>
-          </div>
-        </div>
-
-        <!-- shared -->
-        <div class="bt-section">
-          <div class="bt-section-title">COMMISSION</div>
-          <div class="bt-field">
-            <label class="bt-label">Commission Per Lot ($)</label>
-            <input class="bt-input" type="number" id="bt_commPerLot" value="1.25" min="0" step="0.25"/>
-            <div class="bt-toggle-label" id="bt_commHint">
-              1.00 lot × $1.25 = $1.25 commission/trade
-            </div>
-          </div>
-        </div>
-        <!-- SPREAD SIMULATION -->
-        <div class="bt-section">
-          <div class="bt-section-title">SPREAD SIMULATION</div>
-          <div class="bt-field">
-            <label class="bt-label">Random Spread</label>
-            <div class="bt-toggle-row">
-              <label class="bt-toggle"><input type="checkbox" id="bt_spreadEnabled"/><span class="bt-toggle-slider"></span></label>
-              <span class="bt-toggle-label">Apply random spread per trade (realistic slippage)</span>
-            </div>
-          </div>
-
-          <div id="bt_spreadWrap" style="display:none;">
-            <div class="bt-field">
-              <label class="bt-label">Min Spread ($)</label>
-              <input class="bt-input" type="number" id="bt_spreadMin" value="0.10" min="0" step="0.01"/>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">Max Spread ($)</label>
-              <input class="bt-input" type="number" id="bt_spreadMax" value="0.50" min="0" step="0.01"/>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">Seed (0 = random)</label>
-              <input class="bt-input" type="number" id="bt_spreadSeed" value="0" min="0" step="1"/>
-            </div>
-          </div>
-        </div>
-
-        <!-- ═══ CURRENCY DISPLAY (display-only) ═══ -->
-        <div class="bt-section" id="cc_section_manual">
-          <div class="bt-section-title">CURRENCY DISPLAY</div>
-
-          <div class="bt-field" style="flex-direction:row;align-items:center;gap:8px;">
-            <input type="checkbox" id="cc_enabled"
-                   style="accent-color:var(--accent,#00e5ff);"/>
-            <label class="bt-label" for="cc_enabled"
-                   style="margin:0;cursor:pointer;">
-              Enable Currency Conversion
-            </label>
-          </div>
-
-          <div id="cc_panel" style="display:none;flex-direction:column;gap:8px;">
-            <div class="bt-field">
-              <label class="bt-label">Currency Symbol</label>
-              <select id="cc_symbol" class="bt-select">
-                <option value="$" selected>$</option>
-                <option value="¥">¥</option>
-                <option value="€">€</option>
-                <option value="£">£</option>
-                <option value="₹">₹</option>
-                <option value="৳">৳</option>
-              </select>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">Multiplier (1 USD = ?)</label>
-              <input type="number" id="cc_multiplier" class="bt-input"
-                     value="1" min="0.0001" step="0.01" />
-            </div>
-
-            <div class="bt-toggle-label"
-                 style="font-size:0.54rem;color:#586f7f;">
-              Display-only — does NOT affect backtest calculations.
-            </div>
-          </div>
-        </div>
-
-        <!-- STRATEGY MODE ONLY -->
-        <div id="bt_strategyPanel" style="display:none;">
-          <div class="bt-section">
-            <div class="bt-section-title">LOAD STRATEGY</div>
-
-            <div class="bt-field">
-              <label class="bt-label">Available Strategy</label>
-              <select class="bt-select" id="bt_strategySelect"></select>
-            </div>
-
-            <div class="bt-field">
-              <label class="bt-label">Description</label>
-              <div class="bt-toggle-label" id="bt_strategyDescription">Loading strategies…</div>
-            </div>
-          </div>
-
-          <div class="bt-section">
-            <div class="bt-section-title">STRATEGY PARAMETERS</div>
-            <div id="bt_strategyParams"></div>
-          </div>
-
-          <div class="bt-section">
-            <div class="bt-section-title">SIMULATION</div>
-
-            <div class="bt-field">
-              <label class="bt-label">Monte Carlo Runs</label>
-              <input class="bt-input" type="number" id="bt_mcRuns" value="1000" min="0" step="100"/>
-            </div>
-          </div>
-
-          <div class="bt-run-wrap">
-            <button class="bt-run-btn" id="bt_strategyRunBtn">
-              <span class="bt-run-icon">▶</span> RUN BACKTEST
-            </button>
-          </div>
-        </div>
-
-        <!-- MANUAL RUN -->
-        <div class="bt-run-wrap bt-manual-only" id="bt_manualRunWrap">
-          <button class="bt-run-btn" id="bt_runBtn">
-            <span class="bt-run-icon">▶</span> START BACKTEST
-          </button>
-        </div>
-      </aside>
-
-      <!-- ── RIGHT RESULTS ─────────────────────────────────────────── -->
-      <div class="bt-results-panel" id="bt_resultsPanel">
-        <div class="bt-progress-wrap" id="bt_progressWrap" style="display:none;">
-          <div class="bt-progress-header">
-            <span class="bt-progress-label" id="bt_progressLabel">Initialising…</span>
-            <span class="bt-progress-pct" id="bt_progressPct">0%</span>
-          </div>
-          <div class="bt-progress-track"><div class="bt-progress-bar" id="bt_progressBar" style="width:0%"></div></div>
-          <div class="bt-progress-steps">
-            <span class="bt-step" id="step_load">LOAD DATA</span><span class="bt-step-arrow">→</span>
-            <span class="bt-step" id="step_run">RUN LOGIC</span><span class="bt-step-arrow">→</span>
-            <span class="bt-step" id="step_stats">COMPUTE STATS</span><span class="bt-step-arrow">→</span>
-            <span class="bt-step" id="step_charts">BUILD CHARTS</span><span class="bt-step-arrow">→</span>
-            <span class="bt-step" id="step_done">DONE</span>
-          </div>
-          <div class="bt-live-stats" id="bt_liveStats" style="display:none;">
-            <div class="bt-live-stat"><span class="bt-live-label">EQUITY</span><span class="bt-live-value" id="bt_liveEquity">—</span></div>
-            <div class="bt-live-stat"><span class="bt-live-label">DRAWDOWN</span><span class="bt-live-value" id="bt_liveDD">—</span></div>
-            <div class="bt-live-stat"><span class="bt-live-label">OPEN TRADE</span><span class="bt-live-value" id="bt_liveOpen">—</span></div>
-            <div class="bt-live-stat"><span class="bt-live-label">LAST P&L</span><span class="bt-live-value" id="bt_lastPnl">—</span></div>
-          </div>
-        </div>
-
-        <div class="bt-empty" id="bt_empty">
-          <div class="bt-empty-icon">◈</div>
-          <div class="bt-empty-title">No results yet</div>
-          <div class="bt-empty-sub">Configure your strategy and press START BACKTEST</div>
-        </div>
-
-        <div class="bt-dashboard" id="bt_dashboard" style="display:none;">
-          <div class="bt-dash-header">
-            <div class="bt-dash-strategy" id="bd_strategy">—</div>
-            <div class="bt-dash-meta" id="bd_meta">—</div>
-          </div>
-
-          <div class="bt-dash-section"><div class="bt-dash-section-title">CORE STATISTICS</div><div class="bt-kpi-grid" id="bd_coreKpis"></div></div>
-          <div class="bt-dash-section"><div class="bt-dash-section-title">RISK METRICS</div><div class="bt-kpi-grid" id="bd_riskKpis"></div></div>
-          <div class="bt-dash-section"><div class="bt-dash-section-title">PERFORMANCE RATIOS</div><div class="bt-kpi-grid" id="bd_ratioKpis"></div></div>
-
-          <!-- ── NEW PRO STAT SECTIONS ─────────────────────────── -->
-          <div class="bt-dash-section"><div class="bt-dash-section-title">TRADE ANALYSIS</div><div class="bt-kpi-grid" id="bd_tradeKpis"></div></div>
-          <div class="bt-dash-section"><div class="bt-dash-section-title">TIME &amp; EXPOSURE</div><div class="bt-kpi-grid" id="bd_timeExpKpis"></div></div>
-          <div class="bt-dash-section"><div class="bt-dash-section-title">PERIOD PERFORMANCE</div><div class="bt-kpi-grid" id="bd_periodKpis"></div></div>
-          <div class="bt-dash-section"><div class="bt-dash-section-title">MAE / MFE</div><div class="bt-kpi-grid" id="bd_maeMfeKpis"></div></div>
-
-          <div class="bt-dash-section"><div class="bt-dash-section-title">EQUITY CURVE</div><div class="bt-chart-card"><canvas id="cv_equity" class="bt-canvas"></canvas></div></div>
-          <div class="bt-dash-section"><div class="bt-dash-section-title">DRAWDOWN CURVE</div><div class="bt-chart-card"><canvas id="cv_drawdown" class="bt-canvas"></canvas></div></div>
-
-          <div class="bt-dash-section">
-            <div class="bt-dash-section-title">ROLLING METRICS <span class="bt-dash-sub">(20-trade window)</span></div>
-            <div class="bt-chart-2col">
-              <div class="bt-chart-card"><div class="bt-chart-label">WIN RATE %</div><canvas id="cv_rollWr" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card"><div class="bt-chart-label">EXPECTANCY $</div><canvas id="cv_rollExp" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card"><div class="bt-chart-label">PROFIT FACTOR</div><canvas id="cv_rollPf" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card"><div class="bt-chart-label">SHARPE RATIO</div><canvas id="cv_rollSharpe" class="bt-canvas bt-canvas-sm"></canvas></div>
-            </div>
-          </div>
-
-          <div class="bt-dash-section">
-            <div class="bt-dash-section-title">DISTRIBUTIONS</div>
-            <div class="bt-chart-2col">
-              <div class="bt-chart-card"><div class="bt-chart-label">R-MULTIPLE HISTOGRAM</div><canvas id="cv_rHist" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card"><div class="bt-chart-label">TRADE DURATION (BARS)</div><canvas id="cv_durHist" class="bt-canvas bt-canvas-sm"></canvas></div>
-            </div>
-          </div>
-
-          <div class="bt-dash-section">
-            <div class="bt-dash-section-title">SCATTER ANALYSIS</div>
-            <div class="bt-chart-2col">
-              <div class="bt-chart-card"><div class="bt-chart-label">MAE vs MFE</div><canvas id="cv_maemfe" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card"><div class="bt-chart-label">TRADE # vs R-MULTIPLE</div><canvas id="cv_retScatter" class="bt-canvas bt-canvas-sm"></canvas></div>
-            </div>
-          </div>
-
-          <div class="bt-dash-section">
-            <div class="bt-dash-section-title">TIME BREAKDOWN</div>
-            <div class="bt-chart-3col">
-              <div class="bt-chart-card"><div class="bt-chart-label">BY HOUR OF DAY</div><canvas id="cv_hour" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card"><div class="bt-chart-label">BY DAY OF WEEK</div><canvas id="cv_dow" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card"><div class="bt-chart-label">BY MONTH</div><canvas id="cv_month" class="bt-canvas bt-canvas-sm"></canvas></div>
-            </div>
-          </div>
-
-          <div class="bt-dash-section"><div class="bt-dash-section-title">REGIME BREAKDOWN</div><div class="bt-kpi-grid" id="bd_regimeKpis"></div></div>
-
-          <div class="bt-dash-section">
-            <div class="bt-dash-section-title">MONTE CARLO <span class="bt-dash-sub">(configurable runs)</span></div>
-            <div class="bt-kpi-grid" id="bd_mcKpis"></div>
-
-            <div class="bt-chart-2col" style="margin-top:12px;">
-              <div class="bt-chart-card"><div class="bt-chart-label">SIMULATED EQUITY PATHS</div><canvas id="cv_mcPaths" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card"><div class="bt-chart-label">FINAL EQUITY DISTRIBUTION</div><canvas id="cv_mcFinal" class="bt-canvas bt-canvas-sm"></canvas></div>
-            </div>
-
-            <div class="bt-chart-2col" style="margin-top:10px;">
-              <div class="bt-chart-card"><div class="bt-chart-label">MAX DRAWDOWN DISTRIBUTION</div><canvas id="cv_mcDd" class="bt-canvas bt-canvas-sm"></canvas></div>
-              <div class="bt-chart-card" style="padding:16px 18px;">
-                <div class="bt-chart-label" style="margin-bottom:12px;">PROBABILITY TABLE</div>
-                <div id="bd_mcProb"></div>
-              </div>
-            </div>
-          </div>
-
-          <div class="bt-dash-section"><div class="bt-dash-section-title">COMMISSION SUMMARY</div><div class="bt-kpi-grid" id="bd_commKpis"></div></div>
-
-          <div class="bt-dash-section" style="margin-bottom:24px;">
-            <div class="bt-dash-section-title">TRADE LOG</div>
-            <div class="bt-chart-card" style="padding:0; overflow:hidden;">
-              <div class="bt-trade-log" id="bt_tradeLog"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </main>
-
-  <script src="js/chart.js"></script>
-  <script src="js/currency.js"></script>
-  <script src="js/backtest.js"></script>
-  <script src="js/strategy_loader.js"></script>
+  document.getElementById('status').textContent =
+    `ran in ${(t1-t0).toFixed(0)}ms — ${result.trades.length} trades — click any row to focus that trade`;
+});
+</script>
 </body>
 </html>
