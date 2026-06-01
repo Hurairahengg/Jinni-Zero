@@ -1,34 +1,113 @@
-import os, json, csv, time, math, gc, pickle
+import os, json, csv, time, math, gc, pickle, itertools
 import numpy as np
 import pandas as pd
 from math import sqrt
 from collections import defaultdict
 
 # ============================================================ CONFIG
-FILE = "data/NQ/8pt.json"          # change as needed
-OUT_DIR = "out/super_ma_optimizer"
-CKPT_FILE = os.path.join(OUT_DIR, "_results_chunks")
+FILE = "data/NQ/8pt.json"
+OUT_DIR = "out/full_horizon_optimizer"
+CKPT_DIR = os.path.join(OUT_DIR, "_chunks")
 COL_TS, COL_OPEN, COL_HIGH, COL_LOW, COL_CLOSE = "timestamp","open","high","low","close"
+COL_VOL = "volume"   # optional, enables VWMA + VWAP if present
 
 STARTING_CAPITAL    = 1000.0
 RISK_PER_TRADE      = 10.0
 POINT_VALUE_PER_LOT = 1.0
-SLIPPAGE_POINTS     = 0.3            # per execution
-COMMISSION_RT       = 0.80           # per lot per trade
+SLIPPAGE_POINTS     = 0.3
+COMMISSION_RT       = 0.80
 SLIPPAGE_TOTAL      = 2 * SLIPPAGE_POINTS
+MIN_SL_DISTANCE     = 0.1
 
-MA_TYPES   = ["SMA", "EMA", "HMA"]
-MA_VALUES  = [9, 21, 34, 55, 84, 144, 200]
-ENTRY_MODES = ["one_break", "two_confirm"]
-STOP_MODELS = ["fixed_6", "fixed_8", "fixed_10", "candle"]
-RR_VALUES   = [2, 3, 4, 5, 6]
+# ---------- FAMILY TOGGLES (turn off what you don't want this run) ----------
+ENABLE_MA_BREAK            = True
+ENABLE_MA_TWO_CONFIRM      = True
+ENABLE_MA_SLOPE            = True
+ENABLE_MA_STACK            = True
+ENABLE_MA_PULLBACK         = True
+ENABLE_DIST_FROM_MA        = True
+ENABLE_BOLLINGER           = True
+ENABLE_DONCHIAN            = True
+ENABLE_RSI_TREND           = True
+ENABLE_RSI_MEANREV         = True
+ENABLE_MACD                = True
+ENABLE_ADX                 = True
 
-MIN_SL_DISTANCE = 0.1
-KEEP_TOP_K_TRADES = 10               # keep arrays for top 10 by net profit for equity PNG
-CHUNK_SIZE = 200                     # flush results to disk every N candidates
+ENABLE_MEAN_REVERSION_FLIP = True    # for each candidate, also test flipped direction
+ENABLE_OPPOSITE_EXIT       = True
+ENABLE_TRAILING_ATR        = True
+ENABLE_TRAILING_CANDLE     = True
+ENABLE_TIME_EXIT           = True
+ENABLE_MA_EXIT             = True
+ENABLE_FIXED_RR_EXIT       = True
+
+ENABLE_BREAKEVEN_TM        = True
+ENABLE_TRAIL_AFTER_R       = True
+
+ENABLE_MA_TREND_FILTER     = True
+ENABLE_ADX_FILTER          = True
+ENABLE_ATR_PCT_FILTER      = False   # creates 4x explosion — leave off by default
+
+# ---------- SAMPLED PARAMETER SETS (reduce/expand to control candidate count) ----------
+MA_TYPES_FULL      = ["SMA","EMA","HMA","WMA","RMA","DEMA","TEMA","KAMA","ALMA"]
+MA_TYPES_DEFAULT   = ["EMA","HMA","SMA"]                   # sample subset
+MA_LENGTHS_FULL    = [5,8,9,13,21,34,55,84,100,144,200,233,300]
+MA_LENGTHS_DEFAULT = [9,21,55,89,144,200]                  # representative
+
+CONFIRM_MODES      = ["none","close_+1pt","close_+2pt"]    # plus inherent "two_confirm" entry mode
+SLOPE_LOOKBACKS    = [3, 5]
+
+DIST_PTS_THRESHOLDS = [16, 24, 32]
+DIST_Z_THRESHOLDS   = [1.5, 2.0, 2.5]
+
+BB_LENGTHS         = [20, 55]
+BB_STDS            = [2.0, 2.5]
+BB_MODES           = ["breakout","meanrev"]
+
+DONCHIAN_LENGTHS   = [10, 20, 55]
+
+RSI_LENGTHS        = [14]
+RSI_OVERSOLD       = [25, 30]
+RSI_OVERBOUGHT     = [70, 75]
+
+MACD_CFGS          = [(12,26,9),(8,21,5)]
+
+ADX_LENGTHS        = [14]
+ADX_THRESHOLDS     = [20, 25]
+
+STACK_FAST         = [9, 21]
+STACK_MID          = [55, 84]
+STACK_SLOW         = [144, 200]
+
+FIXED_STOPS        = [6, 8, 10, 16]
+SWING_LOOKBACKS    = [3, 5]
+ATR_STOPS_LEN      = [14]
+ATR_STOPS_MULT     = [1.5, 2.0, 3.0]
+
+RR_VALUES          = [1.5, 2, 3, 4, 6]
+TIME_EXITS         = [5, 13, 21]
+TRAIL_ATR_MULT     = [2.0, 3.0]
+TRAIL_CANDLE_N     = [2, 5]
+
+MA_EXIT_LENGTHS    = [9, 21, 55]    # subset; constrained ≤ entry MA at runtime
+
+TM_BREAKEVEN_AT_R  = [None, 1.0, 2.0]   # None = no BE
+TM_TRAIL_AFTER_R   = [None, 1.0]
+
+TREND_FILTER_MAS   = [None, 89, 200]
+ADX_FILTER_THRESH  = [None, 20]
+ATR_PCT_BUCKETS    = [None]             # set [None,(0,25),(25,75),(75,100)] when ATR filter on
+
+# ---------- PERFORMANCE ----------
+CANDIDATE_HARD_CAP = 30000               # safety cap, abort cleanly if exceeded
+CHUNK_SIZE         = 1000
+KEEP_TOP_K         = 10
+PROGRESS_EVERY_S   = 3.0
+FP_MAX_FORWARD     = 500                 # forward walk cap for first-passage
 
 os.makedirs(OUT_DIR, exist_ok=True)
-os.makedirs(CKPT_FILE, exist_ok=True)
+os.makedirs(CKPT_DIR, exist_ok=True)
+
 T0 = time.time()
 def tprint(m): print(f"[{time.time()-T0:7.1f}s] {m}", flush=True)
 
@@ -41,6 +120,7 @@ ts_col = next((c for c in [COL_TS,"time","date","datetime","ts"] if c in df.colu
 for c in (COL_OPEN, COL_HIGH, COL_LOW, COL_CLOSE):
     if c not in df.columns: raise KeyError(f"missing {c}")
 HAS_TS = ts_col is not None
+HAS_VOL = COL_VOL in df.columns
 if HAS_TS:
     df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
     timestamps = df[ts_col].values
@@ -51,891 +131,1073 @@ opn = df[COL_OPEN].astype(np.float64).values
 hi  = df[COL_HIGH].astype(np.float64).values
 lo  = df[COL_LOW].astype(np.float64).values
 cl  = df[COL_CLOSE].astype(np.float64).values
+vol = df[COL_VOL].astype(np.float64).values if HAS_VOL else None
 N_BARS = len(df)
 del df, data; gc.collect()
-tprint(f"bars: {N_BARS:,}")
+tprint(f"bars: {N_BARS:,}   HAS_TS={HAS_TS}   HAS_VOL={HAS_VOL}")
 
 
 # ============================================================ INDICATORS
-def sma_vec(arr, p):
+def sma(arr, p):
     out = np.full(len(arr), np.nan, np.float32)
     if len(arr) < p: return out
     cs = np.cumsum(arr, dtype=np.float64)
     out[p-1:] = ((cs[p-1:] - np.concatenate(([0], cs[:-p]))) / p).astype(np.float32)
     return out
-
-def ema_vec(arr, p):
-    a = 2.0/(p+1.0); out = np.empty(len(arr), np.float32); out[0] = arr[0]
-    for i in range(1, len(arr)): out[i] = a*arr[i] + (1-a)*out[i-1]
+def ema(arr, p):
+    a = 2.0/(p+1.0); out = np.empty(len(arr), np.float32); out[0]=arr[0]
+    for i in range(1,len(arr)): out[i] = a*arr[i] + (1-a)*out[i-1]
     return out
-
-def wma_vec(arr, p):
-    w = np.arange(1, p+1, dtype=np.float64); ws = w.sum()
+def wma(arr, p):
+    w = np.arange(1,p+1,dtype=np.float64); ws=w.sum()
     out = np.full(len(arr), np.nan, np.float32)
     if len(arr) < p: return out
     out[p-1:] = (np.convolve(arr, w[::-1], "valid") / ws).astype(np.float32)
     return out
-
-def hma_vec(arr, p):
-    half = p // 2; sp = int(sqrt(p))
-    raw = 2.0 * wma_vec(arr, half).astype(np.float64) - wma_vec(arr, p).astype(np.float64)
-    valid = ~np.isnan(raw)
-    rc = np.where(valid, raw, 0.0)
-    sm = wma_vec(rc, sp)
+def hma(arr, p):
+    half=p//2; sp=int(sqrt(p))
+    raw = 2.0*wma(arr,half).astype(np.float64) - wma(arr,p).astype(np.float64)
+    valid = ~np.isnan(raw); rc = np.where(valid, raw, 0.0)
+    sm = wma(rc, sp)
     inv = (~valid).astype(np.int32); cs = np.cumsum(inv)
     bad = np.zeros(len(arr), bool)
     for i in range(sp-1, len(arr)):
-        s = cs[i] - (cs[i-sp] if i-sp >= 0 else 0)
+        s = cs[i] - (cs[i-sp] if i-sp>=0 else 0)
         if s > 0: bad[i] = True
-    bad[:sp-1] = True
-    sm[bad] = np.nan
+    bad[:sp-1] = True; sm[bad] = np.nan
     return sm
+def rma(arr, p):  # Wilder
+    a = 1.0/p; out = np.empty(len(arr), np.float32); out[0]=arr[0]
+    for i in range(1,len(arr)): out[i] = a*arr[i] + (1-a)*out[i-1]
+    return out
+def dema(arr, p):
+    e1 = ema(arr, p); e2 = ema(e1.astype(np.float64), p)
+    return (2.0*e1 - e2).astype(np.float32)
+def tema(arr, p):
+    e1 = ema(arr, p); e2 = ema(e1.astype(np.float64), p); e3 = ema(e2.astype(np.float64), p)
+    return (3.0*e1 - 3.0*e2 + e3).astype(np.float32)
+def kama(arr, p, fast=2, slow=30):
+    n = len(arr); out = np.full(n, np.nan, np.float32)
+    if n <= p: return out
+    fast_a = 2.0/(fast+1); slow_a = 2.0/(slow+1)
+    change = np.abs(arr[p:] - arr[:-p])
+    volatility = np.array([np.sum(np.abs(np.diff(arr[i-p:i+1]))) for i in range(p, n)])
+    er = np.where(volatility > 0, change/volatility, 0.0)
+    sc = (er*(fast_a - slow_a) + slow_a)**2
+    out[p] = arr[p]
+    for i in range(p+1, n):
+        out[i] = out[i-1] + sc[i-p]*(arr[i] - out[i-1])
+    return out
+def alma(arr, p, offset=0.85, sigma=6):
+    n = len(arr); out = np.full(n, np.nan, np.float32)
+    if n < p: return out
+    m = offset*(p-1); s = p/sigma
+    w = np.array([np.exp(-((i-m)**2)/(2*s*s)) for i in range(p)])
+    w = w / w.sum()
+    for i in range(p-1, n):
+        out[i] = float(np.dot(arr[i-p+1:i+1], w))
+    return out
+def vwma(arr, vol_arr, p):
+    if vol_arr is None: return None
+    out = np.full(len(arr), np.nan, np.float32)
+    pv = arr * vol_arr
+    csv_ = np.cumsum(vol_arr, dtype=np.float64)
+    cspv = np.cumsum(pv, dtype=np.float64)
+    for i in range(p-1, len(arr)):
+        v = csv_[i] - (csv_[i-p] if i-p>=0 else 0)
+        if v > 0: out[i] = (cspv[i] - (cspv[i-p] if i-p>=0 else 0)) / v
+    return out
 
-tprint("precomputing all MAs (3 types × 7 periods = 21 arrays)…")
-MA = {}
-for t in MA_TYPES:
-    for p in MA_VALUES:
-        if   t == "SMA": MA[(t,p)] = sma_vec(cl, p)
-        elif t == "EMA": MA[(t,p)] = ema_vec(cl, p)
-        else:            MA[(t,p)] = hma_vec(cl, p)
-tprint(f"  MA memory ≈ {21 * N_BARS * 4 / 1e6:.1f} MB")
+def calc_ma(kind, arr, p):
+    if kind == "SMA": return sma(arr, p)
+    if kind == "EMA": return ema(arr, p)
+    if kind == "HMA": return hma(arr, p)
+    if kind == "WMA": return wma(arr, p)
+    if kind == "RMA": return rma(arr, p)
+    if kind == "DEMA": return dema(arr, p)
+    if kind == "TEMA": return tema(arr, p)
+    if kind == "KAMA": return kama(arr, p)
+    if kind == "ALMA": return alma(arr, p)
+    if kind == "VWMA": return vwma(arr, vol, p)
+    raise ValueError(kind)
 
+# ATR / RSI / MACD / ADX / Bollinger / Donchian / Z-score
+def atr(p):
+    tr = np.maximum(hi - lo, np.maximum(np.abs(hi - np.concatenate(([cl[0]], cl[:-1]))),
+                                         np.abs(lo - np.concatenate(([cl[0]], cl[:-1])))))
+    return rma(tr, p)
 
-# ============================================================ SIGNAL PRECOMPUTE
-# For each (ma_type, ma_period, entry_mode), compute arrays:
-#   long_entry_idx[]  long_signal_low[]  (low of the SIGNAL candle for candle stop)
-#   short_entry_idx[] short_signal_high[]
-# Signal candle = breakout bar for one_break, 2nd confirm bar for two_confirm.
-# Entry price is always close of the entry bar.
+def rsi(p):
+    delta = np.diff(cl, prepend=cl[0])
+    up = np.where(delta > 0, delta, 0.0); dn = np.where(delta < 0, -delta, 0.0)
+    avg_up = rma(up, p); avg_dn = rma(dn, p)
+    rs = np.where(avg_dn > 0, avg_up/avg_dn, 0.0)
+    return (100 - 100/(1+rs)).astype(np.float32)
 
-tprint("precomputing entry signals for all (ma_type, period, mode)…")
-SIGNALS = {}   # (ma_type, period, mode) -> dict(long_idx, long_sl, short_idx, short_sl)
+def macd_hist(fast, slow, signal):
+    ef = ema(cl, fast); es = ema(cl, slow)
+    line = (ef - es)
+    sig = ema(line.astype(np.float64), signal)
+    return (line - sig).astype(np.float32)
 
-for mt in MA_TYPES:
-    for p in MA_VALUES:
-        ma = MA[(mt, p)]
-        valid = ~np.isnan(ma)
-        # one_break
-        above = (cl > ma) & valid
-        below = (cl < ma) & valid
-        prev_above = np.concatenate(([False], above[:-1]))
-        prev_below = np.concatenate(([False], below[:-1]))
-        long_break  = (~prev_above) & above
-        short_break = (~prev_below) & below
-        # need prev MA valid too
-        prev_valid = np.concatenate(([False], valid[:-1]))
-        long_break  &= prev_valid
-        short_break &= prev_valid
+def adx_di(p):
+    up_move = hi - np.concatenate(([hi[0]], hi[:-1]))
+    dn_move = np.concatenate(([lo[0]], lo[:-1])) - lo
+    plus_dm  = np.where((up_move > dn_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((dn_move > up_move) & (dn_move > 0), dn_move, 0.0)
+    tr = np.maximum(hi - lo, np.maximum(np.abs(hi - np.concatenate(([cl[0]], cl[:-1]))),
+                                         np.abs(lo - np.concatenate(([cl[0]], cl[:-1])))))
+    atr_ = rma(tr, p)
+    plus_di  = 100 * rma(plus_dm, p)  / np.where(atr_>0, atr_, np.nan)
+    minus_di = 100 * rma(minus_dm, p) / np.where(atr_>0, atr_, np.nan)
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di+minus_di)>0, plus_di+minus_di, np.nan)
+    adx = rma(np.nan_to_num(dx), p)
+    return adx.astype(np.float32), plus_di.astype(np.float32), minus_di.astype(np.float32)
 
-        long_idx_1  = np.where(long_break)[0].astype(np.int32)
-        short_idx_1 = np.where(short_break)[0].astype(np.int32)
-        # signal candle = the break bar itself
-        SIGNALS[(mt, p, "one_break")] = {
-            "long_idx":   long_idx_1,
-            "long_sig_low":  lo[long_idx_1],
-            "short_idx":  short_idx_1,
-            "short_sig_high": hi[short_idx_1],
-        }
+def bollinger(p, k):
+    m = sma(cl, p)
+    sd = np.full(len(cl), np.nan, np.float32)
+    for i in range(p-1, len(cl)):
+        sd[i] = float(np.std(cl[i-p+1:i+1]))
+    upper = m + k*sd; lower = m - k*sd
+    return m, upper, lower
 
-        # two_confirm: break at t, then close[t+1] above ma[t+1] for long (close[t+1] below for short)
-        # confirm bar = t+1; that's the SIGNAL candle (and entry bar)
-        # also require ma[t+1] valid
-        valid_next = np.concatenate((valid[1:], [False]))   # valid at t+1
-        ma_next = np.concatenate((ma[1:], [np.nan]))
-        cl_next = np.concatenate((cl[1:], [np.nan]))
-        lo_next = np.concatenate((lo[1:], [np.nan]))
-        hi_next = np.concatenate((hi[1:], [np.nan]))
-
-        long_confirm  = long_break  & valid_next & (cl_next > ma_next)
-        short_confirm = short_break & valid_next & (cl_next < ma_next)
-
-        # Entry bar is t+1
-        entry_idx_long_2  = np.where(long_confirm)[0].astype(np.int32) + 1
-        entry_idx_short_2 = np.where(short_confirm)[0].astype(np.int32) + 1
-        # signal candle = entry bar (the 2nd confirmation candle)
-        # filter idx within bounds
-        m_l = entry_idx_long_2  < N_BARS
-        m_s = entry_idx_short_2 < N_BARS
-        entry_idx_long_2  = entry_idx_long_2[m_l]
-        entry_idx_short_2 = entry_idx_short_2[m_s]
-
-        SIGNALS[(mt, p, "two_confirm")] = {
-            "long_idx":   entry_idx_long_2,
-            "long_sig_low":  lo[entry_idx_long_2],
-            "short_idx":  entry_idx_short_2,
-            "short_sig_high": hi[entry_idx_short_2],
-        }
-
-# diagnostic
-for mt in MA_TYPES:
-    for p in MA_VALUES:
-        for mode in ENTRY_MODES:
-            s = SIGNALS[(mt, p, mode)]
-            tprint(f"  {mt}{p:>3} {mode:<12} : L={len(s['long_idx']):>6,}  S={len(s['short_idx']):>6,}")
-
-
-# ============================================================ FIRST-PASSAGE WITH FIXED SL + RR EXIT
-# For fixed-SL trades, exit is FIRST of: TP hit, SL hit, end of data.
-# Same-bar TP+SL → SL (loss) per spec.
-# Returns parallel arrays: outcome(int8), exit_offset(int32)
-# 1=win, 0=loss, -1=unresolved
-def simulate_fixed_rr(entries, side, sl_pts, rr):
-    """Use precomputed forward path on demand. Vectorized cmax."""
-    if len(entries) == 0:
-        return (np.zeros(0, np.int8), np.zeros(0, np.int32),
-                np.zeros(0, np.float32), np.zeros(0, np.float32))
-    tp_pts = sl_pts * rr
-    outcome = np.full(len(entries), -1, np.int8)
-    exit_off = np.zeros(len(entries), np.int32)
-    sl_dist_out = np.full(len(entries), sl_pts, np.float32)
-    tp_pts_out  = np.full(len(entries), tp_pts, np.float32)
-    for i, e in enumerate(entries):
-        entry = cl[e]
-        if side == 1:
-            tp_lvl = entry + tp_pts; sl_lvl = entry - sl_pts
-        else:
-            tp_lvl = entry - tp_pts; sl_lvl = entry + sl_pts
-        # forward walk
-        for j in range(e + 1, N_BARS):
-            h, l = hi[j], lo[j]
-            if side == 1:
-                tp_hit = h >= tp_lvl
-                sl_hit = l <= sl_lvl
-            else:
-                tp_hit = l <= tp_lvl
-                sl_hit = h >= sl_lvl
-            if tp_hit and sl_hit:
-                outcome[i] = 0; exit_off[i] = j - e; break
-            if sl_hit:
-                outcome[i] = 0; exit_off[i] = j - e; break
-            if tp_hit:
-                outcome[i] = 1; exit_off[i] = j - e; break
-        else:
-            exit_off[i] = N_BARS - 1 - e
-    return outcome, exit_off, sl_dist_out, tp_pts_out
+def donchian(p):
+    upper = np.full(len(cl), np.nan, np.float32)
+    lower = np.full(len(cl), np.nan, np.float32)
+    for i in range(p-1, len(cl)):
+        upper[i] = hi[i-p+1:i+1].max()
+        lower[i] = lo[i-p+1:i+1].min()
+    return upper, lower
 
 
-def simulate_candle_rr(entries, sig_levels, side, rr):
-    """Candle SL: long uses signal_low; short uses signal_high.
-       Returns outcome, exit_off, sl_dist_per_trade, tp_pts_per_trade."""
+# precompute MAs needed
+tprint("precomputing MAs…")
+MA_SET = set(MA_TYPES_DEFAULT)
+MA_CACHE = {}
+for mt in MA_SET:
+    if mt == "VWMA" and not HAS_VOL: continue
+    for p in set(MA_LENGTHS_DEFAULT + MA_EXIT_LENGTHS + STACK_FAST + STACK_MID + STACK_SLOW
+                 + [x for x in TREND_FILTER_MAS if x is not None]):
+        MA_CACHE[(mt, p)] = calc_ma(mt, cl, p)
+
+# precompute ATR, RSI, MACD, ADX, BB, Donchian
+tprint("precomputing oscillators…")
+ATR_CACHE = {p: atr(p) for p in ATR_STOPS_LEN}
+RSI_CACHE = {p: rsi(p) for p in RSI_LENGTHS}
+MACD_CACHE = {cfg: macd_hist(*cfg) for cfg in MACD_CFGS}
+ADX_CACHE = {p: adx_di(p) for p in ADX_LENGTHS}
+BB_CACHE = {(p,k): bollinger(p,k) for p in BB_LENGTHS for k in BB_STDS}
+DC_CACHE = {p: donchian(p) for p in DONCHIAN_LENGTHS}
+tprint("indicators ready")
+
+
+# ============================================================ ENTRY SIGNAL GENERATORS
+# Each returns (long_entry_idx, short_entry_idx, long_sig_low, short_sig_high)
+def sig_ma_break(mt, p):
+    ma = MA_CACHE[(mt,p)]; valid = ~np.isnan(ma)
+    pa = np.concatenate(([False], (cl > ma)[:-1]))
+    pb = np.concatenate(([False], (cl < ma)[:-1]))
+    long_mask  = (~pa) & (cl > ma) & valid & np.concatenate(([False], valid[:-1]))
+    short_mask = (~pb) & (cl < ma) & valid & np.concatenate(([False], valid[:-1]))
+    li = np.where(long_mask)[0].astype(np.int32)
+    si = np.where(short_mask)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_ma_two_confirm(mt, p):
+    ma = MA_CACHE[(mt,p)]; valid = ~np.isnan(ma)
+    pa = np.concatenate(([False], (cl > ma)[:-1]))
+    pb = np.concatenate(([False], (cl < ma)[:-1]))
+    long_break  = (~pa) & (cl > ma) & valid
+    short_break = (~pb) & (cl < ma) & valid
+    next_valid = np.concatenate((valid[1:], [False]))
+    ma_next = np.concatenate((ma[1:], [np.nan]))
+    cl_next = np.concatenate((cl[1:], [np.nan]))
+    long_conf  = long_break  & next_valid & (cl_next > ma_next)
+    short_conf = short_break & next_valid & (cl_next < ma_next)
+    li = (np.where(long_conf)[0]  + 1).astype(np.int32)
+    si = (np.where(short_conf)[0] + 1).astype(np.int32)
+    li = li[li < N_BARS]; si = si[si < N_BARS]
+    return li, si, lo[li], hi[si]
+
+def sig_ma_slope(mt, p, k):
+    ma = MA_CACHE[(mt,p)]; valid = ~np.isnan(ma)
+    slope = np.full(N_BARS, np.nan, np.float32)
+    slope[k:] = ma[k:] - ma[:-k]
+    above = (cl > ma) & valid & (slope > 0)
+    below = (cl < ma) & valid & (slope < 0)
+    # only when transitioning into that state (avoid every-bar spam)
+    pa = np.concatenate(([False], above[:-1])); pb = np.concatenate(([False], below[:-1]))
+    li = np.where(above & ~pa)[0].astype(np.int32)
+    si = np.where(below & ~pb)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_ma_stack(mt, fp, mp, sp):
+    f_, m_, s_ = MA_CACHE[(mt,fp)], MA_CACHE[(mt,mp)], MA_CACHE[(mt,sp)]
+    valid = ~(np.isnan(f_)|np.isnan(m_)|np.isnan(s_))
+    bull = valid & (cl > f_) & (f_ > m_) & (m_ > s_)
+    bear = valid & (cl < f_) & (f_ < m_) & (m_ < s_)
+    pa = np.concatenate(([False], bull[:-1])); pb = np.concatenate(([False], bear[:-1]))
+    li = np.where(bull & ~pa)[0].astype(np.int32)
+    si = np.where(bear & ~pb)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_ma_pullback(mt, p, slope_k=5):
+    ma = MA_CACHE[(mt,p)]; valid = ~np.isnan(ma)
+    slope = np.full(N_BARS, np.nan, np.float32)
+    slope[slope_k:] = ma[slope_k:] - ma[:-slope_k]
+    # long: trend up + touched MA + closed back above
+    touched_below_long = lo <= ma
+    closed_above = cl > ma
+    long_mask  = valid & (slope > 0) & touched_below_long & closed_above
+    touched_above_short = hi >= ma
+    closed_below = cl < ma
+    short_mask = valid & (slope < 0) & touched_above_short & closed_below
+    pa = np.concatenate(([False], long_mask[:-1])); pb = np.concatenate(([False], short_mask[:-1]))
+    li = np.where(long_mask & ~pa)[0].astype(np.int32)
+    si = np.where(short_mask & ~pb)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_dist_from_ma(mt, p, thresh_pts):
+    ma = MA_CACHE[(mt,p)]; valid = ~np.isnan(ma)
+    dist = cl - ma
+    # mean-reversion: long when far below, short when far above
+    li = np.where(valid & (dist <= -thresh_pts))[0].astype(np.int32)
+    si = np.where(valid & (dist >=  thresh_pts))[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_bollinger(p, k, mode):
+    m, u, l = BB_CACHE[(p,k)]
+    valid = ~(np.isnan(u) | np.isnan(l))
+    if mode == "breakout":
+        long_mask  = valid & (cl > u)
+        short_mask = valid & (cl < l)
+    else:  # meanrev
+        long_mask  = valid & (cl < l)
+        short_mask = valid & (cl > u)
+    pa = np.concatenate(([False], long_mask[:-1])); pb = np.concatenate(([False], short_mask[:-1]))
+    li = np.where(long_mask & ~pa)[0].astype(np.int32)
+    si = np.where(short_mask & ~pb)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_donchian(p):
+    u, l = DC_CACHE[p]
+    pa_u = np.concatenate(([np.nan], u[:-1]))
+    pa_l = np.concatenate(([np.nan], l[:-1]))
+    long_mask  = ~np.isnan(pa_u) & (cl > pa_u)
+    short_mask = ~np.isnan(pa_l) & (cl < pa_l)
+    pl = np.concatenate(([False], long_mask[:-1])); ps = np.concatenate(([False], short_mask[:-1]))
+    li = np.where(long_mask & ~pl)[0].astype(np.int32)
+    si = np.where(short_mask & ~ps)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_rsi_trend(p):
+    r = RSI_CACHE[p]
+    r_prev = np.concatenate(([np.nan], r[:-1]))
+    long_mask  = (r > 50) & (r > r_prev) & ~np.isnan(r)
+    short_mask = (r < 50) & (r < r_prev) & ~np.isnan(r)
+    pa = np.concatenate(([False], long_mask[:-1])); pb = np.concatenate(([False], short_mask[:-1]))
+    li = np.where(long_mask & ~pa)[0].astype(np.int32)
+    si = np.where(short_mask & ~pb)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_rsi_meanrev(p, os_, ob):
+    r = RSI_CACHE[p]
+    li = np.where(r <= os_)[0].astype(np.int32)
+    si = np.where(r >= ob)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_macd(cfg):
+    h = MACD_CACHE[cfg]
+    h_prev = np.concatenate(([np.nan], h[:-1]))
+    long_mask  = (h > 0) & (h > h_prev) & ~np.isnan(h)
+    short_mask = (h < 0) & (h < h_prev) & ~np.isnan(h)
+    pa = np.concatenate(([False], long_mask[:-1])); pb = np.concatenate(([False], short_mask[:-1]))
+    li = np.where(long_mask & ~pa)[0].astype(np.int32)
+    si = np.where(short_mask & ~pb)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+def sig_adx(p, thresh):
+    adx_, pdi, mdi = ADX_CACHE[p]
+    valid = ~np.isnan(adx_)
+    long_mask  = valid & (pdi > mdi) & (adx_ >= thresh)
+    short_mask = valid & (mdi > pdi) & (adx_ >= thresh)
+    pa = np.concatenate(([False], long_mask[:-1])); pb = np.concatenate(([False], short_mask[:-1]))
+    li = np.where(long_mask & ~pa)[0].astype(np.int32)
+    si = np.where(short_mask & ~pb)[0].astype(np.int32)
+    return li, si, lo[li], hi[si]
+
+
+# ============================================================ FILTERS
+def filter_ma_trend(entries, side, trend_p):
+    if trend_p is None: return entries
+    ma = MA_CACHE[("EMA", trend_p)]
+    slope = np.full(N_BARS, np.nan, np.float32)
+    slope[5:] = ma[5:] - ma[:-5]
+    if side == 1:  mask = slope[entries] > 0
+    else:          mask = slope[entries] < 0
+    return entries[mask]
+
+def filter_adx(entries, thresh):
+    if thresh is None: return entries
+    adx_, _, _ = ADX_CACHE[14]
+    return entries[adx_[entries] >= thresh]
+
+
+# ============================================================ STOP CALCULATORS
+def stop_for(entries, side, kind, value=None):
+    """Returns sl_dist (>0) per trade. Returns None for trades skipped (sl<=0)."""
     n = len(entries)
-    outcome = np.full(n, -1, np.int8)
-    exit_off = np.zeros(n, np.int32)
-    sl_dist_arr = np.zeros(n, np.float32)
-    tp_pts_arr  = np.zeros(n, np.float32)
-    valid_mask = np.zeros(n, bool)
-    for i, e in enumerate(entries):
-        entry = cl[e]
-        if side == 1:
-            sl_dist = entry - sig_levels[i]
-        else:
-            sl_dist = sig_levels[i] - entry
-        if sl_dist < MIN_SL_DISTANCE:
-            continue  # skip degenerate
-        valid_mask[i] = True
-        sl_dist_arr[i] = sl_dist
+    if n == 0: return np.zeros(0, np.float32), np.zeros(0, bool)
+    sd = np.zeros(n, np.float32)
+    valid = np.ones(n, bool)
+    e_close = cl[entries]
+    if kind == "fixed":
+        sd[:] = float(value)
+    elif kind == "candle":
+        if side == 1: sd[:] = e_close - lo[entries]
+        else:         sd[:] = hi[entries] - e_close
+    elif kind == "prev_candle":
+        prev_idx = np.maximum(entries - 1, 0)
+        if side == 1: sd[:] = e_close - lo[prev_idx]
+        else:         sd[:] = hi[prev_idx] - e_close
+    elif kind == "swing":
+        n_lb = int(value)
+        for i, e in enumerate(entries):
+            lo_window = lo[max(0, e-n_lb+1):e+1]
+            hi_window = hi[max(0, e-n_lb+1):e+1]
+            if side == 1: sd[i] = e_close[i] - lo_window.min()
+            else:         sd[i] = hi_window.max() - e_close[i]
+    elif kind == "atr":
+        atr_len, mult = value
+        a = ATR_CACHE[atr_len]
+        sd[:] = a[entries] * mult
+    elif kind == "ma":
+        mt, p = value
+        ma_arr = MA_CACHE[(mt, p)]
+        if side == 1: sd[:] = e_close - ma_arr[entries]
+        else:         sd[:] = ma_arr[entries] - e_close
+    valid = sd >= MIN_SL_DISTANCE
+    return sd, valid
+
+
+# ============================================================ TRADE SIMULATION
+def simulate_trade(e_idx, side, sl_dist, exit_cfg):
+    """Walk forward. Returns (outcome 1/0/-1, exit_off, exit_price).
+       exit_cfg = dict with kind: 'fixed_rr'|'ma_close'|'opposite_signal'|'atr_trail'|'candle_trail'|'time' + params."""
+    entry = cl[e_idx]
+    if side == 1:
+        sl_lvl = entry - sl_dist
+    else:
+        sl_lvl = entry + sl_dist
+    end = min(e_idx + FP_MAX_FORWARD, N_BARS - 1)
+
+    kind = exit_cfg["kind"]
+    # TP target for fixed_rr
+    if kind == "fixed_rr":
+        rr = exit_cfg["rr"]
         tp_pts = sl_dist * rr
-        tp_pts_arr[i] = tp_pts
-        if side == 1:
-            tp_lvl = entry + tp_pts; sl_lvl = entry - sl_dist
-        else:
-            tp_lvl = entry - tp_pts; sl_lvl = entry + sl_dist
-        for j in range(e + 1, N_BARS):
-            h, l = hi[j], lo[j]
+        tp_lvl = entry + tp_pts if side == 1 else entry - tp_pts
+    elif kind == "ma_close":
+        exit_ma = exit_cfg["ma_arr"]
+    elif kind == "atr_trail":
+        a = exit_cfg["atr_arr"]; mult = exit_cfg["mult"]
+        peak_close = entry; trail = sl_lvl
+    elif kind == "candle_trail":
+        n_lb = exit_cfg["n_lb"]
+        trail = sl_lvl
+    elif kind == "time":
+        max_hold = exit_cfg["bars"]
+    # else: opposite_signal not implemented here (would need cross-strategy state) → fall back to ma_close fallback
+
+    # TM
+    be_at_R = exit_cfg.get("be_at_R")
+    trail_after_R = exit_cfg.get("trail_after_R")
+    trail_active = False
+
+    for j in range(e_idx + 1, end + 1):
+        h, l, c = hi[j], lo[j], cl[j]
+        bars_held = j - e_idx
+
+        # Breakeven move
+        if be_at_R is not None:
             if side == 1:
-                tp_hit = h >= tp_lvl; sl_hit = l <= sl_lvl
+                if (h - entry) >= be_at_R * sl_dist:
+                    sl_lvl = max(sl_lvl, entry)
             else:
-                tp_hit = l <= tp_lvl; sl_hit = h >= sl_lvl
-            if tp_hit and sl_hit:
-                outcome[i] = 0; exit_off[i] = j - e; break
-            if sl_hit:
-                outcome[i] = 0; exit_off[i] = j - e; break
-            if tp_hit:
-                outcome[i] = 1; exit_off[i] = j - e; break
-        else:
-            exit_off[i] = N_BARS - 1 - e
-    return outcome, exit_off, sl_dist_arr, tp_pts_arr, valid_mask
+                if (entry - l) >= be_at_R * sl_dist:
+                    sl_lvl = min(sl_lvl, entry)
 
+        # Trail activation
+        if trail_after_R is not None and not trail_active:
+            if side == 1 and (h - entry) >= trail_after_R * sl_dist:
+                trail_active = True
+            elif side == -1 and (entry - l) >= trail_after_R * sl_dist:
+                trail_active = True
 
-def simulate_fixed_ma_exit(entries, side, sl_pts, exit_ma_arr):
-    """Fixed SL with MA close exit.
-       Exit = SL hit (intrabar) OR close-side flip vs exit MA, whichever first."""
-    n = len(entries)
-    outcome = np.full(n, -1, np.int8)   # 1=win (any positive net), 0=loss, -1=unresolved
-    exit_off = np.zeros(n, np.int32)
-    sl_dist_arr = np.full(n, sl_pts, np.float32)
-    exit_price_arr = np.zeros(n, np.float32)
-    for i, e in enumerate(entries):
-        entry = cl[e]
+        # Trailing logic for atr_trail / candle_trail when active (or always for those kinds)
+        if kind == "atr_trail":
+            if (trail_after_R is None) or trail_active:
+                if side == 1:
+                    if c > peak_close: peak_close = c
+                    new_trail = peak_close - a[j] * mult
+                    if new_trail > sl_lvl: sl_lvl = new_trail
+                else:
+                    if c < peak_close: peak_close = c
+                    new_trail = peak_close + a[j] * mult
+                    if new_trail < sl_lvl: sl_lvl = new_trail
+        elif kind == "candle_trail":
+            if (trail_after_R is None) or trail_active:
+                lo_window = lo[max(0, j-n_lb+1):j+1]
+                hi_window = hi[max(0, j-n_lb+1):j+1]
+                if side == 1:
+                    new_trail = float(lo_window.min())
+                    if new_trail > sl_lvl: sl_lvl = new_trail
+                else:
+                    new_trail = float(hi_window.max())
+                    if new_trail < sl_lvl: sl_lvl = new_trail
+
+        # SL intrabar (conservative)
         if side == 1:
-            sl_lvl = entry - sl_pts
+            if l <= sl_lvl:
+                gross = sl_lvl - entry
+                return (0 if gross <= 0 else 1), j - e_idx, sl_lvl
         else:
-            sl_lvl = entry + sl_pts
-        for j in range(e + 1, N_BARS):
-            h, l = hi[j], lo[j]
-            # SL intrabar
-            if side == 1 and l <= sl_lvl:
-                outcome[i] = 0; exit_off[i] = j - e
-                exit_price_arr[i] = sl_lvl; break
-            if side == -1 and h >= sl_lvl:
-                outcome[i] = 0; exit_off[i] = j - e
-                exit_price_arr[i] = sl_lvl; break
-            # MA close exit
-            ema_j = exit_ma_arr[j]
-            if math.isnan(ema_j): continue
-            c_j = cl[j]
-            if side == 1 and c_j < ema_j:
-                gross = c_j - entry
-                outcome[i] = 1 if gross > 0 else 0
-                exit_off[i] = j - e; exit_price_arr[i] = c_j; break
-            if side == -1 and c_j > ema_j:
-                gross = entry - c_j
-                outcome[i] = 1 if gross > 0 else 0
-                exit_off[i] = j - e; exit_price_arr[i] = c_j; break
-        else:
-            exit_off[i] = N_BARS - 1 - e
-            exit_price_arr[i] = cl[N_BARS - 1]
-    return outcome, exit_off, sl_dist_arr, exit_price_arr
+            if h >= sl_lvl:
+                gross = entry - sl_lvl
+                return (0 if gross <= 0 else 1), j - e_idx, sl_lvl
+
+        # TP / exit conditions
+        if kind == "fixed_rr":
+            if side == 1 and h >= tp_lvl: return 1, j - e_idx, tp_lvl
+            if side == -1 and l <= tp_lvl: return 1, j - e_idx, tp_lvl
+        elif kind == "ma_close":
+            mv = exit_ma[j]
+            if not np.isnan(mv):
+                if side == 1 and c < mv: return (1 if c > entry else 0), j - e_idx, c
+                if side == -1 and c > mv: return (1 if c < entry else 0), j - e_idx, c
+        elif kind == "time" and bars_held >= max_hold:
+            return (1 if ((side == 1 and c > entry) or (side == -1 and c < entry)) else 0), bars_held, c
+
+    return -1, end - e_idx, cl[end]
 
 
-def simulate_candle_ma_exit(entries, sig_levels, side, exit_ma_arr):
+# ============================================================ METRICS (vectorized)
+def safe_div(a, b):
+    if b > 0: return a/b
+    if a > 0: return float("inf")
+    return 0.0
+
+def compute_metrics(entries, sides, outcomes, net_pts, net_dol, sl_dist, hold_bars,
+                    commission_arr, slippage_arr):
     n = len(entries)
-    outcome = np.full(n, -1, np.int8)
-    exit_off = np.zeros(n, np.int32)
-    sl_dist_arr = np.zeros(n, np.float32)
-    exit_price_arr = np.zeros(n, np.float32)
-    valid_mask = np.zeros(n, bool)
-    for i, e in enumerate(entries):
-        entry = cl[e]
-        if side == 1:
-            sl_dist = entry - sig_levels[i]
-        else:
-            sl_dist = sig_levels[i] - entry
-        if sl_dist < MIN_SL_DISTANCE:
-            continue
-        valid_mask[i] = True
-        sl_dist_arr[i] = sl_dist
-        if side == 1:
-            sl_lvl = entry - sl_dist
-        else:
-            sl_lvl = entry + sl_dist
-        for j in range(e + 1, N_BARS):
-            h, l = hi[j], lo[j]
-            if side == 1 and l <= sl_lvl:
-                outcome[i] = 0; exit_off[i] = j - e
-                exit_price_arr[i] = sl_lvl; break
-            if side == -1 and h >= sl_lvl:
-                outcome[i] = 0; exit_off[i] = j - e
-                exit_price_arr[i] = sl_lvl; break
-            ema_j = exit_ma_arr[j]
-            if math.isnan(ema_j): continue
-            c_j = cl[j]
-            if side == 1 and c_j < ema_j:
-                gross = c_j - entry
-                outcome[i] = 1 if gross > 0 else 0
-                exit_off[i] = j - e; exit_price_arr[i] = c_j; break
-            if side == -1 and c_j > ema_j:
-                gross = entry - c_j
-                outcome[i] = 1 if gross > 0 else 0
-                exit_off[i] = j - e; exit_price_arr[i] = c_j; break
-        else:
-            exit_off[i] = N_BARS - 1 - e
-            exit_price_arr[i] = cl[N_BARS - 1]
-    return outcome, exit_off, sl_dist_arr, exit_price_arr, valid_mask
-
-
-# ============================================================ POSITION FILTER (one active per setup)
-def apply_one_active(entries_sorted, exit_off):
-    """Keep trades that don't overlap. entries_sorted must be chronologically sorted."""
-    n = len(entries_sorted)
-    if n == 0: return np.zeros(0, bool)
-    keep = np.zeros(n, bool)
-    free_at = -1
-    for i in range(n):
-        if int(entries_sorted[i]) >= free_at:
-            keep[i] = True
-            free_at = int(entries_sorted[i]) + int(exit_off[i]) + 1
-    return keep
-
-
-# ============================================================ PNL + METRICS
-def compute_pnl_and_metrics(entries, side_arr, outcome, exit_off, sl_dist,
-                            tp_pts=None, exit_price=None, is_rr=True):
-    """Returns metrics dict and per-trade dollar series for equity/DD reconstruction.
-       For RR exits: tp_pts provides win-exit points. For MA exits: exit_price provides realized price."""
-    n = len(entries)
-    if n == 0: return _empty(0), None
-    # gross points per trade
-    gross_pts = np.zeros(n, np.float32)
-    for i in range(n):
-        o = outcome[i]
-        if o == -1: continue
-        if is_rr:
-            if o == 1: gross_pts[i] = tp_pts[i]
-            else:      gross_pts[i] = -sl_dist[i]
-        else:
-            entry = cl[entries[i]]
-            if side_arr[i] == 1: gross_pts[i] = exit_price[i] - entry
-            else:                gross_pts[i] = entry - exit_price[i]
-
-    lot = (RISK_PER_TRADE / sl_dist).astype(np.float32)
-    comm = (lot * COMMISSION_RT).astype(np.float32)
-    slip_dol = (SLIPPAGE_TOTAL * lot * POINT_VALUE_PER_LOT).astype(np.float32)
-    net_pts = gross_pts - SLIPPAGE_TOTAL
-    # set unresolved net_pts/dol to 0
-    res_mask = outcome != -1
-    net_pts = np.where(res_mask, net_pts, 0.0).astype(np.float32)
-    net_dol = np.where(res_mask, net_pts * lot * POINT_VALUE_PER_LOT - comm, 0.0).astype(np.float32)
-    # commission only counted for resolved
-    comm_eff = np.where(res_mask, comm, 0.0)
-    slip_eff = np.where(res_mask, slip_dol, 0.0)
-
-    nr = int(res_mask.sum())
-    if nr == 0: return _empty(n), None
-
-    # win = positive net_dol; loss = non-positive
-    wins_mask = res_mask & (net_dol > 0)
-    losses_mask = res_mask & (net_dol <= 0)
+    if n == 0: return _empty(0)
+    res = outcomes != -1; nr = int(res.sum())
+    if nr == 0: return _empty(n)
+    wins_mask = res & (net_dol > 0)
+    losses_mask = res & (net_dol <= 0)
     nw, nl = int(wins_mask.sum()), int(losses_mask.sum())
-    wr = nw / nr * 100
-    gross_profit_pts = float(gross_pts[wins_mask].sum())
-    gross_loss_pts   = float(-gross_pts[losses_mask].sum())
-    gp_d = float(net_dol[wins_mask].sum())
-    gl_d = float(-net_dol[losses_mask].sum())
-    pf_d = (gp_d / gl_d) if gl_d > 0 else (float("inf") if gp_d > 0 else 0.0)
-    net_profit = float(net_dol[res_mask].sum())
-    ev_dol = net_profit / nr
-    ev_R   = ev_dol / RISK_PER_TRADE
-    avg_win_pts  = float(gross_pts[wins_mask].mean()) if nw else 0.0
-    avg_loss_pts = float(gross_pts[losses_mask].mean()) if nl else 0.0
-    avg_win_d    = (gp_d / nw) if nw else 0.0
-    avg_loss_d   = -(gl_d / nl) if nl else 0.0
-    comm_total = float(comm_eff.sum())
-    slip_total = float(slip_eff.sum())
-
-    # equity / DD
-    cum = np.cumsum(net_dol[res_mask]) + STARTING_CAPITAL
-    peak = np.maximum.accumulate(cum)
-    dd = peak - cum
+    wr = nw/nr*100
+    gross_pts_pos = float(net_pts[wins_mask].sum())
+    gross_pts_neg = float(-net_pts[losses_mask].sum())
+    gp_d = float(net_dol[wins_mask].sum()); gl_d = float(-net_dol[losses_mask].sum())
+    pf_d = safe_div(gp_d, gl_d)
+    net_p = float(net_dol[res].sum())
+    ev_d = net_p / nr
+    ev_R = ev_d / RISK_PER_TRADE
+    avg_w_pts = float(net_pts[wins_mask].mean()) if nw else 0.0
+    avg_l_pts = float(net_pts[losses_mask].mean()) if nl else 0.0
+    avg_w_dol = gp_d/nw if nw else 0.0
+    avg_l_dol = -gl_d/nl if nl else 0.0
+    wl_ratio = avg_w_dol / abs(avg_l_dol) if avg_l_dol != 0 else 0.0
+    comm_t = float(commission_arr[res].sum()); slip_t = float(slippage_arr[res].sum())
+    # equity/DD
+    cum = np.cumsum(net_dol[res]) + STARTING_CAPITAL
+    peak = np.maximum.accumulate(cum); dd = peak - cum
     max_dd_d = float(dd.max())
-    dd_pct = np.where(peak > 0, dd / peak * 100, 0.0)
-    max_dd_p = float(dd_pct.max())
-    # max losing streak
-    loss_seq = (outcome[res_mask] != 1) | (net_dol[res_mask] <= 0)
-    # actually use net_dol sign for streak (consistent with WR classification)
-    loss_seq = (net_dol[res_mask] <= 0)
-    mls = 0; cnt = 0
-    for v in loss_seq:
-        if v: cnt += 1
-        else: cnt = 0
-        if cnt > mls: mls = cnt
-
-    holds = exit_off[res_mask]
+    max_dd_p = float(np.where(peak>0, dd/peak*100, 0.0).max())
+    # streaks
+    loss_seq = (net_dol[res] <= 0).astype(np.int8)
+    win_seq  = (net_dol[res] >  0).astype(np.int8)
+    def max_run(seq):
+        m=0; c=0
+        for v in seq:
+            if v: c += 1
+            else: c = 0
+            if c > m: m = c
+        return m
+    mls = max_run(loss_seq); mws = max_run(win_seq)
+    holds = hold_bars[res]
     avg_h = float(holds.mean()) if len(holds) else 0.0
     med_h = float(np.median(holds)) if len(holds) else 0.0
-
-    # sharpe/sortino per trade dollar
-    rets = net_dol[res_mask]
+    rets = net_dol[res]
     if nr >= 2:
         m_ = float(rets.mean()); s_ = float(rets.std())
         downs = rets[rets < 0]
-        ds = float(downs.std()) if len(downs) > 1 else (float(abs(downs[0])) if len(downs) == 1 else 0.0)
-        sharpe = (m_/s_*sqrt(nr)) if s_ > 0 else 0.0
-        sortino = (m_/ds*sqrt(nr)) if ds > 0 else 0.0
+        ds = float(downs.std()) if len(downs) > 1 else (float(abs(downs[0])) if len(downs)==1 else 0.0)
+        sharpe = (m_/s_*sqrt(nr)) if s_>0 else 0.0
+        sortino = (m_/ds*sqrt(nr)) if ds>0 else 0.0
     else: sharpe = sortino = 0.0
 
-    # long / short blocks
     def sblk(mask_side):
-        mm = mask_side & res_mask
+        mm = mask_side & res
         nn = int(mm.sum())
-        if nn == 0: return dict(trades=0, wr=0.0, pf=0.0, net=0.0, ev=0.0)
+        if nn == 0: return dict(trades=0,wr=0.0,pf=0.0,net=0.0,ev=0.0)
         wm = mm & wins_mask; lm = mm & losses_mask
-        ww = int(wm.sum())
-        gw_d = float(net_dol[wm].sum()); gl_d_ = float(-net_dol[lm].sum())
-        return dict(trades=nn, wr=ww/nn*100,
-                    pf=(gw_d/gl_d_) if gl_d_ > 0 else (float("inf") if gw_d > 0 else 0.0),
+        return dict(trades=nn, wr=int(wm.sum())/nn*100,
+                    pf=safe_div(float(net_dol[wm].sum()), float(-net_dol[lm].sum())),
                     net=float(net_dol[mm].sum()),
                     ev=float(net_dol[mm].sum())/nn)
-
-    long_blk  = sblk(side_arr == 1)
-    short_blk = sblk(side_arr == -1)
-
     return {
-        "trades": n, "resolved": nr, "wins": nw, "losses": nl, "unresolved": n - nr,
-        "wr": wr,
-        "gross_profit_pts": gross_profit_pts, "gross_loss_pts": gross_loss_pts,
-        "gross_profit_dol": gp_d, "gross_loss_dol": gl_d,
-        "commission_total": comm_total, "slippage_total": slip_total,
-        "net_profit": net_profit,
-        "pf_dol": pf_d,
-        "expectancy_dol": ev_dol, "expectancy_R": ev_R,
-        "avg_win_pts": avg_win_pts, "avg_loss_pts": avg_loss_pts,
-        "avg_win_dol": avg_win_d, "avg_loss_dol": avg_loss_d,
-        "max_dd_dol": max_dd_d, "max_dd_pct": max_dd_p, "mls": mls,
-        "final_balance": float(cum[-1]),
-        "avg_hold": avg_h, "med_hold": med_h,
-        "sharpe": sharpe, "sortino": sortino,
-        "long": long_blk, "short": short_blk,
-    }, (entries, side_arr, outcome, net_dol, exit_off)
-
+        "trades":n,"resolved":nr,"wins":nw,"losses":nl,"unresolved":n-nr,
+        "wr":wr,"gross_profit_pts":gross_pts_pos,"gross_loss_pts":gross_pts_neg,
+        "gross_profit_dol":gp_d,"gross_loss_dol":gl_d,
+        "commission_total":comm_t,"slippage_total":slip_t,
+        "net_profit":net_p,"pf_dol":pf_d,"expectancy_dol":ev_d,"expectancy_R":ev_R,
+        "avg_win_pts":avg_w_pts,"avg_loss_pts":avg_l_pts,
+        "avg_win_dol":avg_w_dol,"avg_loss_dol":avg_l_dol,"wl_ratio":wl_ratio,
+        "max_dd_dol":max_dd_d,"max_dd_pct":max_dd_p,"mls":mls,"mws":mws,
+        "avg_hold":avg_h,"med_hold":med_h,
+        "final_balance":float(cum[-1]),"sharpe":sharpe,"sortino":sortino,
+        "long":sblk(sides==1),"short":sblk(sides==-1),
+    }
 
 def _empty(n):
-    z = dict(trades=0,wr=0.0,pf=0.0,net=0.0,ev=0.0)
+    z=dict(trades=0,wr=0.0,pf=0.0,net=0.0,ev=0.0)
     return {"trades":n,"resolved":0,"wins":0,"losses":0,"unresolved":n,
             "wr":0.0,"gross_profit_pts":0.0,"gross_loss_pts":0.0,
             "gross_profit_dol":0.0,"gross_loss_dol":0.0,
             "commission_total":0.0,"slippage_total":0.0,
             "net_profit":0.0,"pf_dol":0.0,"expectancy_dol":0.0,"expectancy_R":0.0,
-            "avg_win_pts":0.0,"avg_loss_pts":0.0,"avg_win_dol":0.0,"avg_loss_dol":0.0,
-            "max_dd_dol":0.0,"max_dd_pct":0.0,"mls":0,"final_balance":STARTING_CAPITAL,
-            "avg_hold":0.0,"med_hold":0.0,"sharpe":0.0,"sortino":0.0,
+            "avg_win_pts":0.0,"avg_loss_pts":0.0,
+            "avg_win_dol":0.0,"avg_loss_dol":0.0,"wl_ratio":0.0,
+            "max_dd_dol":0.0,"max_dd_pct":0.0,"mls":0,"mws":0,
+            "avg_hold":0.0,"med_hold":0.0,
+            "final_balance":STARTING_CAPITAL,"sharpe":0.0,"sortino":0.0,
             "long":z,"short":z}
 
 
-# ============================================================ MERGE + ONE-ACTIVE PER SETUP
-def evaluate_candidate(long_entries, long_outcome, long_exoff, long_sl, long_tp_or_xp,
-                       short_entries, short_outcome, short_exoff, short_sl, short_tp_or_xp,
-                       long_valid=None, short_valid=None, is_rr=True):
-    """Combine long+short, sort chronologically, apply one-active-per-setup gating
-       (separate per side since each side is its own setup), then compute metrics."""
-    # apply candle validity if provided
-    if long_valid is not None:
-        long_entries = long_entries[long_valid]
-        long_outcome = long_outcome[long_valid]
-        long_exoff   = long_exoff[long_valid]
-        long_sl      = long_sl[long_valid]
-        long_tp_or_xp = long_tp_or_xp[long_valid]
-    if short_valid is not None:
-        short_entries = short_entries[short_valid]
-        short_outcome = short_outcome[short_valid]
-        short_exoff   = short_exoff[short_valid]
-        short_sl      = short_sl[short_valid]
-        short_tp_or_xp = short_tp_or_xp[short_valid]
+# ============================================================ ONE-ACTIVE GATING (per side)
+def one_active(entries, exit_offs):
+    n = len(entries)
+    keep = np.zeros(n, bool); free_at = -1
+    for i in range(n):
+        ei = int(entries[i]); xi = int(exit_offs[i])
+        if ei >= free_at:
+            keep[i] = True; free_at = ei + xi + 1
+    return keep
 
-    # one-active gating PER SIDE (each side = its own setup per spec)
-    keep_l = apply_one_active(long_entries, long_exoff)
-    keep_s = apply_one_active(short_entries, short_exoff)
 
-    long_entries  = long_entries[keep_l]
-    long_outcome  = long_outcome[keep_l]
-    long_exoff    = long_exoff[keep_l]
-    long_sl       = long_sl[keep_l]
-    long_tp_or_xp = long_tp_or_xp[keep_l]
-    short_entries = short_entries[keep_s]
-    short_outcome = short_outcome[keep_s]
-    short_exoff   = short_exoff[keep_s]
-    short_sl      = short_sl[keep_s]
-    short_tp_or_xp = short_tp_or_xp[keep_s]
+# ============================================================ EVALUATE ONE CANDIDATE
+def evaluate(long_idx, short_idx, sig_low_long, sig_high_short,
+             stop_kind, stop_value, exit_cfg, filt):
+    """Returns metrics dict + (arrays for top-K storage)."""
+    # apply filters
+    if filt.get("trend_ma") is not None:
+        long_idx  = filter_ma_trend(long_idx,  1, filt["trend_ma"])
+        short_idx = filter_ma_trend(short_idx,-1, filt["trend_ma"])
+    if filt.get("adx_thresh") is not None:
+        long_idx  = filter_adx(long_idx,  filt["adx_thresh"])
+        short_idx = filter_adx(short_idx, filt["adx_thresh"])
 
-    # merge
-    entries = np.concatenate([long_entries, short_entries])
-    sides   = np.concatenate([np.ones(len(long_entries), np.int8),
-                              -np.ones(len(short_entries), np.int8)])
-    outcome = np.concatenate([long_outcome, short_outcome])
-    exit_off = np.concatenate([long_exoff, short_exoff])
-    sl_dist  = np.concatenate([long_sl, short_sl])
-    tp_or_xp = np.concatenate([long_tp_or_xp, short_tp_or_xp])
+    # remap sig levels if filters dropped some
+    sig_low_long  = lo[long_idx]
+    sig_high_short = hi[short_idx]
 
-    # sort chronologically for equity/DD calc
+    # stops
+    sd_l, val_l = stop_for(long_idx,  1, stop_kind, stop_value)
+    sd_s, val_s = stop_for(short_idx, -1, stop_kind, stop_value)
+    long_idx = long_idx[val_l]; sd_l = sd_l[val_l]
+    short_idx = short_idx[val_s]; sd_s = sd_s[val_s]
+
+    if len(long_idx) == 0 and len(short_idx) == 0:
+        return _empty(0), None
+
+    # simulate each trade
+    def sim_side(entries, sd_arr, side):
+        n = len(entries)
+        out = np.zeros(n, np.int8); off = np.zeros(n, np.int32)
+        xp = np.zeros(n, np.float32)
+        for i in range(n):
+            o, of, xprice = simulate_trade(int(entries[i]), side, float(sd_arr[i]), exit_cfg)
+            out[i] = o; off[i] = of; xp[i] = xprice
+        return out, off, xp
+
+    out_l, off_l, xp_l = sim_side(long_idx,  sd_l,  1)
+    out_s, off_s, xp_s = sim_side(short_idx, sd_s, -1)
+
+    # one-active per side
+    k_l = one_active(long_idx, off_l); k_s = one_active(short_idx, off_s)
+    long_idx=long_idx[k_l]; sd_l=sd_l[k_l]; out_l=out_l[k_l]; off_l=off_l[k_l]; xp_l=xp_l[k_l]
+    short_idx=short_idx[k_s]; sd_s=sd_s[k_s]; out_s=out_s[k_s]; off_s=off_s[k_s]; xp_s=xp_s[k_s]
+
+    # merge + chronological
+    entries = np.concatenate([long_idx, short_idx])
+    sides   = np.concatenate([np.ones(len(long_idx), np.int8), -np.ones(len(short_idx), np.int8)])
+    sd_all  = np.concatenate([sd_l, sd_s])
+    out_all = np.concatenate([out_l, out_s])
+    off_all = np.concatenate([off_l, off_s])
+    xp_all  = np.concatenate([xp_l, xp_s])
     order = np.argsort(entries, kind="stable")
-    entries = entries[order]; sides = sides[order]; outcome = outcome[order]
-    exit_off = exit_off[order]; sl_dist = sl_dist[order]; tp_or_xp = tp_or_xp[order]
+    entries=entries[order]; sides=sides[order]; sd_all=sd_all[order]
+    out_all=out_all[order]; off_all=off_all[order]; xp_all=xp_all[order]
 
-    if is_rr:
-        metrics, arrays = compute_pnl_and_metrics(entries, sides, outcome, exit_off,
-                                                  sl_dist, tp_pts=tp_or_xp, is_rr=True)
-    else:
-        metrics, arrays = compute_pnl_and_metrics(entries, sides, outcome, exit_off,
-                                                  sl_dist, exit_price=tp_or_xp, is_rr=False)
+    # PnL
+    e_close = cl[entries]
+    gross_pts = np.where(sides==1, xp_all - e_close, e_close - xp_all).astype(np.float32)
+    res = out_all != -1
+    net_pts = np.where(res, gross_pts - SLIPPAGE_TOTAL, 0.0).astype(np.float32)
+    lot = (RISK_PER_TRADE / sd_all).astype(np.float32)
+    comm = (lot * COMMISSION_RT).astype(np.float32)
+    slip_dol = (SLIPPAGE_TOTAL * lot).astype(np.float32)
+    net_dol = np.where(res, net_pts*lot*POINT_VALUE_PER_LOT - comm, 0.0).astype(np.float32)
+    comm_eff = np.where(res, comm, 0.0); slip_eff = np.where(res, slip_dol, 0.0)
+
+    metrics = compute_metrics(entries, sides, out_all, net_pts, net_dol, sd_all, off_all,
+                              comm_eff, slip_eff)
+    arrays = (entries, sides, out_all, net_dol, off_all)
     return metrics, arrays
 
 
-# ============================================================ SWEEP
-TP_SL_PAIRS_FIXED = [("fixed_6", 6.0), ("fixed_8", 8.0), ("fixed_10", 10.0)]
+# ============================================================ CANDIDATE GENERATOR
+def gen_candidates():
+    """Yields dict per candidate. Sampled from each family."""
+    # Entry signal source families
+    entry_sources = []
 
-# Results stream: spill to disk every CHUNK_SIZE
+    if ENABLE_MA_BREAK:
+        for mt in MA_TYPES_DEFAULT:
+            for p in MA_LENGTHS_DEFAULT:
+                entry_sources.append(("ma_break", mt, p))
+    if ENABLE_MA_TWO_CONFIRM:
+        for mt in MA_TYPES_DEFAULT:
+            for p in MA_LENGTHS_DEFAULT:
+                entry_sources.append(("ma_two_confirm", mt, p))
+    if ENABLE_MA_SLOPE:
+        for mt in MA_TYPES_DEFAULT:
+            for p in MA_LENGTHS_DEFAULT:
+                for k in SLOPE_LOOKBACKS:
+                    entry_sources.append(("ma_slope", mt, p, k))
+    if ENABLE_MA_STACK:
+        for mt in MA_TYPES_DEFAULT:
+            for fp in STACK_FAST:
+                for mp in STACK_MID:
+                    for sp_ in STACK_SLOW:
+                        if fp < mp < sp_:
+                            entry_sources.append(("ma_stack", mt, fp, mp, sp_))
+    if ENABLE_MA_PULLBACK:
+        for mt in MA_TYPES_DEFAULT:
+            for p in MA_LENGTHS_DEFAULT:
+                entry_sources.append(("ma_pullback", mt, p))
+    if ENABLE_DIST_FROM_MA:
+        for mt in MA_TYPES_DEFAULT:
+            for p in [21, 55]:
+                for t in DIST_PTS_THRESHOLDS:
+                    entry_sources.append(("dist_ma", mt, p, t))
+    if ENABLE_BOLLINGER:
+        for p in BB_LENGTHS:
+            for k in BB_STDS:
+                for mode in BB_MODES:
+                    entry_sources.append(("bollinger", p, k, mode))
+    if ENABLE_DONCHIAN:
+        for p in DONCHIAN_LENGTHS:
+            entry_sources.append(("donchian", p))
+    if ENABLE_RSI_TREND:
+        for p in RSI_LENGTHS:
+            entry_sources.append(("rsi_trend", p))
+    if ENABLE_RSI_MEANREV:
+        for p in RSI_LENGTHS:
+            for os_ in RSI_OVERSOLD:
+                for ob in RSI_OVERBOUGHT:
+                    entry_sources.append(("rsi_meanrev", p, os_, ob))
+    if ENABLE_MACD:
+        for cfg in MACD_CFGS:
+            entry_sources.append(("macd", cfg))
+    if ENABLE_ADX:
+        for p in ADX_LENGTHS:
+            for t in ADX_THRESHOLDS:
+                entry_sources.append(("adx", p, t))
+
+    # stop variants
+    stop_variants = []
+    for v in FIXED_STOPS: stop_variants.append(("fixed", v))
+    stop_variants.append(("candle", None))
+    stop_variants.append(("prev_candle", None))
+    for n_ in SWING_LOOKBACKS: stop_variants.append(("swing", n_))
+    for al in ATR_STOPS_LEN:
+        for mu in ATR_STOPS_MULT:
+            stop_variants.append(("atr", (al, mu)))
+
+    # exit variants (with TM nested)
+    exit_variants = []
+    if ENABLE_FIXED_RR_EXIT:
+        for rr in RR_VALUES:
+            for be in TM_BREAKEVEN_AT_R:
+                for tr in TM_TRAIL_AFTER_R:
+                    exit_variants.append({"kind":"fixed_rr","rr":rr,"be_at_R":be,"trail_after_R":tr})
+    if ENABLE_MA_EXIT:
+        for ema_len in MA_EXIT_LENGTHS:
+            for mt in MA_TYPES_DEFAULT:
+                exit_variants.append({"kind":"ma_close","ma_arr":MA_CACHE[(mt, ema_len)],
+                                      "label":f"MA_{mt}{ema_len}", "be_at_R":None,"trail_after_R":None})
+    if ENABLE_TRAILING_ATR:
+        for al in ATR_STOPS_LEN:
+            for m in TRAIL_ATR_MULT:
+                exit_variants.append({"kind":"atr_trail","atr_arr":ATR_CACHE[al],
+                                      "mult":m,"label":f"ATRtrail{al}x{m}",
+                                      "be_at_R":None,"trail_after_R":None})
+    if ENABLE_TRAILING_CANDLE:
+        for n_ in TRAIL_CANDLE_N:
+            exit_variants.append({"kind":"candle_trail","n_lb":n_,
+                                  "label":f"candleTrail{n_}",
+                                  "be_at_R":None,"trail_after_R":None})
+    if ENABLE_TIME_EXIT:
+        for b in TIME_EXITS:
+            exit_variants.append({"kind":"time","bars":b,
+                                  "label":f"time{b}",
+                                  "be_at_R":None,"trail_after_R":None})
+
+    # filter combos
+    filter_sets = []
+    for tm in TREND_FILTER_MAS if ENABLE_MA_TREND_FILTER else [None]:
+        for at in ADX_FILTER_THRESH if ENABLE_ADX_FILTER else [None]:
+            filter_sets.append({"trend_ma":tm,"adx_thresh":at})
+
+    # mean-rev flip flag
+    direction_modes = ["trend"]
+    if ENABLE_MEAN_REVERSION_FLIP: direction_modes.append("meanrev")
+
+    # full cartesian
+    for es in entry_sources:
+        for sv in stop_variants:
+            for ev in exit_variants:
+                for fs in filter_sets:
+                    for dm in direction_modes:
+                        yield dict(entry=es, stop=sv, exit=ev, filt=fs, direction=dm)
+
+# estimate candidate count
+def estimate_count():
+    return sum(1 for _ in gen_candidates())
+
+est = estimate_count()
+tprint(f"estimated candidate count: {est:,}  (hard cap: {CANDIDATE_HARD_CAP:,})")
+if est > CANDIDATE_HARD_CAP:
+    tprint(f"  !! exceeds cap. Trim CONFIG (toggle families off or reduce parameter lists).")
+    # we'll still run but with safety break
+
+
+# ============================================================ RESULT STORE
 class ResultStore:
-    def __init__(self, ckpt_dir):
-        self.ckpt_dir = ckpt_dir
-        self.buf = []
-        self.n_chunks = 0
-        self.total = 0
-    def add(self, row): self.buf.append(row); self.total += 1
+    def __init__(self):
+        self.buf = []; self.n_chunks = 0; self.total = 0
+    def add(self, row):
+        self.buf.append(row); self.total += 1
+        if len(self.buf) >= CHUNK_SIZE: self.flush()
     def flush(self):
         if not self.buf: return
-        path = os.path.join(self.ckpt_dir, f"chunk_{self.n_chunks:04d}.pkl")
+        path = os.path.join(CKPT_DIR, f"chunk_{self.n_chunks:05d}.pkl")
         with open(path, "wb") as f: pickle.dump(self.buf, f, protocol=4)
-        self.n_chunks += 1
-        self.buf = []
-        gc.collect()
-    def maybe_flush(self):
-        if len(self.buf) >= CHUNK_SIZE: self.flush()
+        self.n_chunks += 1; self.buf = []; gc.collect()
     def iter_all(self):
         for k in range(self.n_chunks):
-            path = os.path.join(self.ckpt_dir, f"chunk_{k:04d}.pkl")
+            path = os.path.join(CKPT_DIR, f"chunk_{k:05d}.pkl")
             with open(path, "rb") as f: rows = pickle.load(f)
             for r in rows: yield r
             del rows; gc.collect()
 
-store = ResultStore(CKPT_FILE)
-
-# Top-K equity arrays tracker (kept tiny — only top by net_profit)
 class TopK:
-    def __init__(self, k): self.k = k; self.items = []  # list of (net_profit, key, arrays)
-    def add(self, net_profit, key, arrays):
+    def __init__(self, k): self.k=k; self.items=[]
+    def add(self, score, key, arrays):
         if len(self.items) < self.k:
-            self.items.append((net_profit, key, arrays))
-            self.items.sort(key=lambda x: x[0])
-        elif net_profit > self.items[0][0]:
-            self.items[0] = (net_profit, key, arrays)
-            self.items.sort(key=lambda x: x[0])
-topk = TopK(KEEP_TOP_K_TRADES)
+            self.items.append((score, key, arrays)); self.items.sort(key=lambda x:x[0])
+        elif score > self.items[0][0]:
+            self.items[0] = (score, key, arrays); self.items.sort(key=lambda x:x[0])
+
+store = ResultStore()
+topk_net = TopK(KEEP_TOP_K)
+topk_pf  = TopK(KEEP_TOP_K)
 
 
-# Build full candidate grid
-def all_candidates():
-    for mt in MA_TYPES:
-        for p in MA_VALUES:
-            for mode in ENTRY_MODES:
-                for stop_lbl, stop_pts in TP_SL_PAIRS_FIXED:
-                    # fixed RR exits
-                    for rr in RR_VALUES:
-                        yield dict(ma_type=mt, ma=p, mode=mode,
-                                   stop_type=stop_lbl, stop_pts=stop_pts,
-                                   exit_kind="fixed_RR", rr=rr, exit_ma=None)
-                    # MA close exits
-                    for exit_ma in MA_VALUES:
-                        if exit_ma > p: continue
-                        yield dict(ma_type=mt, ma=p, mode=mode,
-                                   stop_type=stop_lbl, stop_pts=stop_pts,
-                                   exit_kind="ma_close", rr=None, exit_ma=exit_ma)
-                # candle stop variant
-                for rr in RR_VALUES:
-                    yield dict(ma_type=mt, ma=p, mode=mode,
-                               stop_type="candle", stop_pts=None,
-                               exit_kind="fixed_RR", rr=rr, exit_ma=None)
-                for exit_ma in MA_VALUES:
-                    if exit_ma > p: continue
-                    yield dict(ma_type=mt, ma=p, mode=mode,
-                               stop_type="candle", stop_pts=None,
-                               exit_kind="ma_close", rr=None, exit_ma=exit_ma)
+# ============================================================ SIGNAL CACHE (per entry source)
+SIG_CACHE = {}
+def get_signals(es):
+    if es in SIG_CACHE: return SIG_CACHE[es]
+    kind = es[0]
+    if   kind == "ma_break":         r = sig_ma_break(es[1], es[2])
+    elif kind == "ma_two_confirm":   r = sig_ma_two_confirm(es[1], es[2])
+    elif kind == "ma_slope":         r = sig_ma_slope(es[1], es[2], es[3])
+    elif kind == "ma_stack":         r = sig_ma_stack(es[1], es[2], es[3], es[4])
+    elif kind == "ma_pullback":      r = sig_ma_pullback(es[1], es[2])
+    elif kind == "dist_ma":          r = sig_dist_from_ma(es[1], es[2], es[3])
+    elif kind == "bollinger":        r = sig_bollinger(es[1], es[2], es[3])
+    elif kind == "donchian":         r = sig_donchian(es[1])
+    elif kind == "rsi_trend":        r = sig_rsi_trend(es[1])
+    elif kind == "rsi_meanrev":      r = sig_rsi_meanrev(es[1], es[2], es[3])
+    elif kind == "macd":             r = sig_macd(es[1])
+    elif kind == "adx":              r = sig_adx(es[1], es[2])
+    else: raise ValueError(kind)
+    SIG_CACHE[es] = r
+    return r
 
-cand_list = list(all_candidates())
-tprint(f"total candidates: {len(cand_list):,}")
+def es_label(es): return "_".join(str(x) for x in es)
+
+def exit_label(ev): return ev.get("label", f"{ev['kind']}_RR{ev.get('rr')}_BE{ev.get('be_at_R')}_TR{ev.get('trail_after_R')}")
 
 
-# ============================================================ MAIN LOOP
+# ============================================================ SWEEP
 tprint("running sweep…")
-done = 0
-last_progress = time.time()
-sweep_start = time.time()
+done = 0; sweep_start = time.time(); last_p = time.time()
+aborted = False
 
-for cand in cand_list:
+for cand in gen_candidates():
+    if done >= CANDIDATE_HARD_CAP:
+        tprint(f"!! hit candidate hard cap ({CANDIDATE_HARD_CAP:,}). Stopping early.")
+        aborted = True; break
     done += 1
-    sig = SIGNALS[(cand["ma_type"], cand["ma"], cand["mode"])]
-    long_idx  = sig["long_idx"]
-    short_idx = sig["short_idx"]
-    long_sig_low  = sig["long_sig_low"]
-    short_sig_high = sig["short_sig_high"]
-
-    if len(long_idx) == 0 and len(short_idx) == 0:
+    li, si, _, _ = get_signals(cand["entry"])
+    # direction mode: meanrev = flip
+    if cand["direction"] == "meanrev":
+        li, si = si, li
+    if len(li) + len(si) < 5:
         continue
+    metrics, arrays = evaluate(li, si, lo[li] if len(li) else None, hi[si] if len(si) else None,
+                               cand["stop"][0], cand["stop"][1], cand["exit"], cand["filt"])
 
-    is_rr = cand["exit_kind"] == "fixed_RR"
-    exit_ma_arr = MA[(cand["ma_type"], cand["exit_ma"])] if cand["exit_ma"] is not None else None
+    key = (f"{es_label(cand['entry'])}|stop_{cand['stop'][0]}_{cand['stop'][1]}|"
+           f"exit_{exit_label(cand['exit'])}|filt_t{cand['filt']['trend_ma']}_a{cand['filt']['adx_thresh']}|"
+           f"dir_{cand['direction']}")
 
-    if cand["stop_type"] != "candle":
-        # fixed SL
-        sl_pts = cand["stop_pts"]
-        if is_rr:
-            rr = cand["rr"]
-            lo_out, lo_exoff, lo_sl, lo_tp = simulate_fixed_rr(long_idx, 1, sl_pts, rr)
-            sh_out, sh_exoff, sh_sl, sh_tp = simulate_fixed_rr(short_idx, -1, sl_pts, rr)
-            metrics, arrays = evaluate_candidate(
-                long_idx, lo_out, lo_exoff, lo_sl, lo_tp,
-                short_idx, sh_out, sh_exoff, sh_sl, sh_tp,
-                is_rr=True)
-        else:
-            lo_out, lo_exoff, lo_sl, lo_xp = simulate_fixed_ma_exit(long_idx, 1, sl_pts, exit_ma_arr)
-            sh_out, sh_exoff, sh_sl, sh_xp = simulate_fixed_ma_exit(short_idx, -1, sl_pts, exit_ma_arr)
-            metrics, arrays = evaluate_candidate(
-                long_idx, lo_out, lo_exoff, lo_sl, lo_xp,
-                short_idx, sh_out, sh_exoff, sh_sl, sh_xp,
-                is_rr=False)
-    else:
-        # candle SL
-        if is_rr:
-            rr = cand["rr"]
-            lo_out, lo_exoff, lo_sl, lo_tp, lo_valid = simulate_candle_rr(
-                long_idx, long_sig_low, 1, rr)
-            sh_out, sh_exoff, sh_sl, sh_tp, sh_valid = simulate_candle_rr(
-                short_idx, short_sig_high, -1, rr)
-            metrics, arrays = evaluate_candidate(
-                long_idx, lo_out, lo_exoff, lo_sl, lo_tp,
-                short_idx, sh_out, sh_exoff, sh_sl, sh_tp,
-                long_valid=lo_valid, short_valid=sh_valid, is_rr=True)
-        else:
-            lo_out, lo_exoff, lo_sl, lo_xp, lo_valid = simulate_candle_ma_exit(
-                long_idx, long_sig_low, 1, exit_ma_arr)
-            sh_out, sh_exoff, sh_sl, sh_xp, sh_valid = simulate_candle_ma_exit(
-                short_idx, short_sig_high, -1, exit_ma_arr)
-            metrics, arrays = evaluate_candidate(
-                long_idx, lo_out, lo_exoff, lo_sl, lo_xp,
-                short_idx, sh_out, sh_exoff, sh_sl, sh_xp,
-                long_valid=lo_valid, short_valid=sh_valid, is_rr=False)
-
-    # build flat row
-    key = (f"{cand['ma_type']}{cand['ma']:>3}_{cand['mode']}_{cand['stop_type']}_"
-           f"{'RR'+str(cand['rr']) if is_rr else 'MAexit'+str(cand['exit_ma'])}")
     row = {
-        "key": key,
-        "ma_type": cand["ma_type"], "entry_ma_value": cand["ma"],
-        "entry_mode": cand["mode"], "stop_type": cand["stop_type"],
-        "exit_type": cand["exit_kind"],
-        "rr_value": cand["rr"] if cand["rr"] is not None else "",
-        "exit_ma_value": cand["exit_ma"] if cand["exit_ma"] is not None else "",
+        "config_id": done, "key": key,
+        "entry_kind": cand["entry"][0], "entry_params": "_".join(str(x) for x in cand["entry"][1:]),
+        "stop_kind": cand["stop"][0], "stop_value": str(cand["stop"][1]),
+        "exit_kind": cand["exit"]["kind"], "exit_label": exit_label(cand["exit"]),
+        "be_at_R": cand["exit"].get("be_at_R"), "trail_after_R": cand["exit"].get("trail_after_R"),
+        "trend_filter": cand["filt"]["trend_ma"], "adx_filter": cand["filt"]["adx_thresh"],
+        "direction_mode": cand["direction"],
     }
     for k in ("trades","resolved","wins","losses","unresolved","wr",
               "gross_profit_pts","gross_loss_pts","gross_profit_dol","gross_loss_dol",
               "commission_total","slippage_total","net_profit",
               "pf_dol","expectancy_dol","expectancy_R",
-              "avg_win_pts","avg_loss_pts","avg_win_dol","avg_loss_dol",
-              "max_dd_dol","max_dd_pct","mls","final_balance",
-              "avg_hold","med_hold","sharpe","sortino"):
+              "avg_win_pts","avg_loss_pts","avg_win_dol","avg_loss_dol","wl_ratio",
+              "max_dd_dol","max_dd_pct","mls","mws","avg_hold","med_hold",
+              "final_balance","sharpe","sortino"):
         row[k] = metrics[k]
     for sd in ("long","short"):
         for k in ("trades","wr","pf","net","ev"):
             row[f"{sd}_{k}"] = metrics[sd][k]
+
+    # safety flags
+    flags = []
+    if metrics["resolved"] < 30: flags.append("low_trades")
+    if metrics["max_dd_dol"] > max(metrics["net_profit"], 1e-9): flags.append("dd_exceeds_profit")
+    if metrics["mls"] > 15: flags.append("long_losing_streak")
+    if metrics["long"]["net"] > 0 and metrics["short"]["net"] < -metrics["long"]["net"]*0.5:
+        flags.append("side_asymmetry")
+    if metrics["commission_total"] + metrics["slippage_total"] > metrics["gross_profit_dol"]:
+        flags.append("costs_exceed_gross_profit")
+    if metrics["final_balance"] <= 0: flags.append("blown_account")
+    row["flags"] = ",".join(flags)
     store.add(row)
-    store.maybe_flush()
 
-    # track top-K by net profit (only keep arrays for true top performers)
     if metrics["net_profit"] > 0 and metrics["resolved"] >= 10:
-        topk.add(metrics["net_profit"], key, arrays)
+        topk_net.add(metrics["net_profit"], key, arrays)
+        if math.isfinite(metrics["pf_dol"]):
+            topk_pf.add(metrics["pf_dol"], key, arrays)
 
-    # progress
-    if time.time() - last_progress >= 3.0:
-        last_progress = time.time()
-        rate = done / (time.time() - sweep_start)
-        eta = (len(cand_list) - done) / rate if rate > 0 else 0
-        tprint(f"  sweep {done:,}/{len(cand_list):,} ({100*done/len(cand_list):5.1f}%) "
-               f"rate={rate:.1f}/s ETA={eta:5.0f}s  results={store.total:,}")
+    if time.time() - last_p >= PROGRESS_EVERY_S:
+        last_p = time.time()
+        rate = done / (time.time()-sweep_start)
+        eta = (est - done) / rate if rate > 0 else 0
+        tprint(f"  sweep {done:,}/{est:,} ({100*done/max(est,1):5.1f}%)  "
+               f"rate={rate:.1f}/s ETA={eta:5.0f}s  results={store.total:,}  chunks={store.n_chunks}")
 
 store.flush()
 tprint(f"SWEEP DONE  candidates: {store.total:,}  chunks: {store.n_chunks}  time: {time.time()-T0:.1f}s")
 
 
-# ============================================================ LOAD ALL RESULTS BACK
-tprint("loading results back from chunks for ranking…")
+# ============================================================ LOAD ALL + RANK
+tprint("loading results for ranking…")
 all_rows = list(store.iter_all())
 tprint(f"  loaded {len(all_rows):,} rows")
 
-# helper for NaN/inf
-def finite(v): return v if (isinstance(v,(int,float)) and math.isfinite(v)) else 0.0
+def finite(v):
+    return v if isinstance(v,(int,float)) and math.isfinite(v) else 0.0
 
-# ============================================================ RANKINGS
-def rank_by(rows, sort_keys, top=50, min_trades=10):
+def rank(rows, key_fn, top=100, min_trades=10):
     valid = [r for r in rows if r["resolved"] >= min_trades]
-    valid.sort(key=lambda r: tuple(sort_keys(r)))
+    valid.sort(key=key_fn)
     return valid[:top]
 
 def sect(t): print(); print("="*100); print(f" {t}"); print("="*100)
-def kfmt(r): return r["key"][:46]
+def k(r): return r["key"][:60]
 
-def print_top(label, rows, cols, n=50):
+def print_top(label, rows, cols, n=20):
     sect(label)
-    hdr = f"  {'#':>3}  {'key':<46} | " + "  ".join(f"{c:>11}" for c in cols)
-    print(hdr); print("-"*len(hdr))
+    print(f"  {'#':>3}  {'key':<60} | " + "  ".join(f"{c:>11}" for c in cols))
+    print("-"*100)
     for i, r in enumerate(rows[:n], 1):
-        vals = []
+        vals=[]
         for c in cols:
             v = r.get(c, 0)
-            if isinstance(v, float):
-                vals.append(f"{v:>+10.3f}" if abs(v) < 100 else f"{v:>+10,.1f}")
-            else:
-                vals.append(f"{v:>11}")
-        print(f"  {i:>3}  {kfmt(r):<46} | " + "  ".join(vals))
+            if isinstance(v,float): vals.append(f"{v:>+11.3f}" if abs(v)<1000 else f"{v:>+11,.1f}")
+            else: vals.append(f"{str(v):>11}")
+        print(f"  {i:>3}  {k(r):<60} | " + "  ".join(vals))
 
-# Top 50 by net profit
-top_net = rank_by(all_rows, lambda r: (-finite(r["net_profit"]),
-                                       -finite(r["pf_dol"]),
-                                       -finite(r["expectancy_R"]),
-                                       finite(r["max_dd_pct"])))
-print_top("TOP 50 BY NET PROFIT", top_net,
-          ["resolved","wr","pf_dol","net_profit","expectancy_R",
-           "max_dd_pct","mls","final_balance"])
-
-# Top 50 by PF
-top_pf = rank_by(all_rows, lambda r: (-finite(r["pf_dol"]),
-                                      -finite(r["net_profit"]),
-                                      finite(r["max_dd_pct"])))
-print_top("TOP 50 BY PROFIT FACTOR", top_pf,
-          ["resolved","wr","pf_dol","net_profit","expectancy_R","max_dd_pct"])
-
-# Top 50 by expectancy in R
-top_ev = rank_by(all_rows, lambda r: (-finite(r["expectancy_R"]),
-                                      -finite(r["net_profit"]),
-                                      finite(r["max_dd_pct"])))
-print_top("TOP 50 BY EXPECTANCY (R)", top_ev,
-          ["resolved","wr","pf_dol","net_profit","expectancy_R","max_dd_pct"])
-
-# Top 50 by final balance
-top_fb = rank_by(all_rows, lambda r: (-finite(r["final_balance"]),
-                                      -finite(r["pf_dol"])))
-print_top("TOP 50 BY FINAL BALANCE", top_fb,
-          ["resolved","wr","pf_dol","net_profit","final_balance","max_dd_pct"])
-
-# Top 50 lowest DD among profitable
+top_net = rank(all_rows, lambda r: (-finite(r["net_profit"]),
+                                    -finite(r["pf_dol"]),
+                                    -finite(r["expectancy_R"])), top=100)
+top_pf  = rank(all_rows, lambda r: (-finite(r["pf_dol"]),
+                                    -finite(r["net_profit"])), top=100)
+top_evR = rank(all_rows, lambda r: -finite(r["expectancy_R"]), top=100)
+top_fb  = rank(all_rows, lambda r: -finite(r["final_balance"]), top=100)
 profitable = [r for r in all_rows if r["net_profit"] > 0 and r["resolved"] >= 10]
-profitable.sort(key=lambda r: (finite(r["max_dd_pct"]),
-                                -finite(r["net_profit"])))
-print_top("TOP 50 LOWEST DD% (PROFITABLE ONLY)", profitable,
+profitable.sort(key=lambda r: (finite(r["max_dd_pct"]), -finite(r["net_profit"])))
+top_pf_100trd  = rank([r for r in all_rows if r["resolved"]>=100],
+                       lambda r: -finite(r["pf_dol"]), top=100)
+top_evR_100trd = rank([r for r in all_rows if r["resolved"]>=100],
+                       lambda r: -finite(r["expectancy_R"]), top=100)
+
+print_top("TOP 20 BY NET PROFIT", top_net,
+          ["resolved","wr","pf_dol","net_profit","expectancy_R","max_dd_pct","mls","final_balance"])
+print_top("TOP 20 BY PROFIT FACTOR", top_pf,
+          ["resolved","wr","pf_dol","net_profit","expectancy_R","max_dd_pct"])
+print_top("TOP 20 BY EXPECTANCY R", top_evR,
+          ["resolved","wr","pf_dol","net_profit","expectancy_R","max_dd_pct"])
+print_top("TOP 20 BY FINAL BALANCE", top_fb,
+          ["resolved","wr","pf_dol","net_profit","final_balance","max_dd_pct"])
+print_top("TOP 20 LOWEST DD% (PROFITABLE)", profitable[:100],
           ["resolved","wr","pf_dol","net_profit","max_dd_pct","final_balance"])
+print_top("TOP 20 PF WITH >=100 TRADES", top_pf_100trd,
+          ["resolved","wr","pf_dol","net_profit","expectancy_R","max_dd_pct"])
+print_top("TOP 20 EVR WITH >=100 TRADES", top_evR_100trd,
+          ["resolved","wr","pf_dol","net_profit","expectancy_R","max_dd_pct"])
 
 
 # ============================================================ GROUPED SUMMARIES
 def group_summary(rows, key_fn):
-    groups = defaultdict(list)
-    for r in rows: groups[key_fn(r)].append(r)
+    g = defaultdict(list)
+    for r in rows: g[key_fn(r)].append(r)
     out = []
-    for g, items in groups.items():
+    for grp, items in g.items():
         nets = np.array([r["net_profit"] for r in items])
-        pfs  = np.array([r["pf_dol"] if math.isfinite(r["pf_dol"]) else 0 for r in items])
+        pfs = np.array([r["pf_dol"] if math.isfinite(r["pf_dol"]) else 0 for r in items])
         evRs = np.array([r["expectancy_R"] for r in items])
-        prof_pct = float((nets > 0).mean() * 100)
-        out.append({
-            "group": g, "n_configs": len(items),
-            "avg_net": float(nets.mean()), "median_net": float(np.median(nets)),
-            "avg_pf": float(pfs.mean()), "median_pf": float(np.median(pfs)),
-            "avg_evR": float(evRs.mean()),
-            "pct_profitable": prof_pct,
-        })
-    out.sort(key=lambda x: -x["avg_net"])
+        dds = np.array([r["max_dd_pct"] for r in items])
+        out.append({"group":grp,"n_configs":len(items),
+                    "profitable_count":int((nets>0).sum()),
+                    "profitable_pct":float((nets>0).mean()*100),
+                    "avg_net":float(nets.mean()),"median_net":float(np.median(nets)),
+                    "avg_pf":float(pfs.mean()),"median_pf":float(np.median(pfs)),
+                    "avg_evR":float(evRs.mean()),"median_evR":float(np.median(evRs)),
+                    "avg_dd":float(dds.mean()),"median_dd":float(np.median(dds))})
+    out.sort(key=lambda x:-x["avg_net"])
     return out
 
-def print_group(label, rows):
+def print_grp(label, rows):
     sect(label)
-    print(f"  {'group':<30} {'n':>5}  {'avg_net':>10} {'med_net':>10} "
-          f"{'avg_PF':>7} {'med_PF':>7} {'avg_EVR':>8} {'%prof':>7}")
+    print(f"  {'group':<30} {'n':>5} {'%prof':>6} {'avg_net':>10} {'med_net':>10} "
+          f"{'avg_PF':>7} {'med_PF':>7} {'avg_EVR':>8} {'avg_DD%':>7}")
     print("-"*100)
     for r in rows:
-        print(f"  {str(r['group']):<30} {r['n_configs']:>5,}  "
-              f"{r['avg_net']:>+10,.1f} {r['median_net']:>+10,.1f}  "
-              f"{r['avg_pf']:>7.3f} {r['median_pf']:>7.3f}  "
-              f"{r['avg_evR']:>+8.3f}  {r['pct_profitable']:>6.2f}%")
+        print(f"  {str(r['group']):<30} {r['n_configs']:>5,} {r['profitable_pct']:>5.1f}% "
+              f"{r['avg_net']:>+10,.1f} {r['median_net']:>+10,.1f} "
+              f"{r['avg_pf']:>7.3f} {r['median_pf']:>7.3f} "
+              f"{r['avg_evR']:>+8.3f} {r['avg_dd']:>6.2f}%")
 
-print_group("GROUPED BY MA TYPE",     group_summary(all_rows, lambda r: r["ma_type"]))
-print_group("GROUPED BY ENTRY MA",    group_summary(all_rows, lambda r: f"MA{r['entry_ma_value']:>3}"))
-print_group("GROUPED BY ENTRY MODE",  group_summary(all_rows, lambda r: r["entry_mode"]))
-print_group("GROUPED BY STOP TYPE",   group_summary(all_rows, lambda r: r["stop_type"]))
-print_group("GROUPED BY EXIT TYPE",   group_summary(all_rows, lambda r: r["exit_type"]))
+print_grp("GROUPED BY ENTRY KIND",   group_summary(all_rows, lambda r:r["entry_kind"]))
+print_grp("GROUPED BY STOP KIND",    group_summary(all_rows, lambda r:r["stop_kind"]))
+print_grp("GROUPED BY EXIT KIND",    group_summary(all_rows, lambda r:r["exit_kind"]))
+print_grp("GROUPED BY DIR MODE",     group_summary(all_rows, lambda r:r["direction_mode"]))
+print_grp("GROUPED BY TREND FILTER", group_summary(all_rows, lambda r:f"trend={r['trend_filter']}"))
+print_grp("GROUPED BY ADX FILTER",   group_summary(all_rows, lambda r:f"adx={r['adx_filter']}"))
 
 
-# ============================================================ CSV OUTPUTS
+# ============================================================ CSV
 def save(path, rows, lbl):
     if not rows: tprint(f"  [csv] {lbl}: empty"); return
-    keys = []; seen = set()
+    keys=[]; seen=set()
     for r in rows:
-        for k in r:
-            if k not in seen: seen.add(k); keys.append(k)
-    with open(path, "w", newline="") as f:
+        for kk in r:
+            if kk not in seen: seen.add(kk); keys.append(kk)
+    with open(path,"w",newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore", restval="")
         w.writeheader()
         for r in rows: w.writerow(r)
     tprint(f"  [csv] {lbl}: {len(rows):,} rows -> {path}")
 
-save(os.path.join(OUT_DIR, "super_ma_full_results.csv"), all_rows, "full")
-save(os.path.join(OUT_DIR, "super_ma_top_net.csv"),   top_net, "top_net")
-save(os.path.join(OUT_DIR, "super_ma_top_pf.csv"),    top_pf, "top_pf")
-save(os.path.join(OUT_DIR, "super_ma_top_evR.csv"),   top_ev, "top_evR")
-save(os.path.join(OUT_DIR, "super_ma_top_fb.csv"),    top_fb, "top_fb")
-save(os.path.join(OUT_DIR, "super_ma_top_lowest_dd.csv"), profitable[:50], "lowest_dd")
+save(os.path.join(OUT_DIR,"full_horizon_results.csv"),       all_rows,         "all")
+save(os.path.join(OUT_DIR,"full_horizon_top_net.csv"),       top_net,          "top_net")
+save(os.path.join(OUT_DIR,"full_horizon_top_pf.csv"),        top_pf,           "top_pf")
+save(os.path.join(OUT_DIR,"full_horizon_top_evR.csv"),       top_evR,          "top_evR")
+save(os.path.join(OUT_DIR,"full_horizon_top_fb.csv"),        top_fb,           "top_fb")
+save(os.path.join(OUT_DIR,"full_horizon_lowest_dd.csv"),     profitable[:100], "lowest_dd")
+save(os.path.join(OUT_DIR,"full_horizon_pf_100trades.csv"),  top_pf_100trd,    "pf_100trd")
+save(os.path.join(OUT_DIR,"full_horizon_evR_100trades.csv"), top_evR_100trd,   "evR_100trd")
 
-# group summaries
-for lbl, fn in [("ma_type", lambda r: r["ma_type"]),
-                ("entry_ma", lambda r: f"MA{r['entry_ma_value']}"),
-                ("entry_mode", lambda r: r["entry_mode"]),
-                ("stop_type", lambda r: r["stop_type"]),
-                ("exit_type", lambda r: r["exit_type"])]:
-    save(os.path.join(OUT_DIR, f"super_ma_group_by_{lbl}.csv"),
+for lbl, fn in [("entry_kind", lambda r:r["entry_kind"]),
+                ("stop_kind",  lambda r:r["stop_kind"]),
+                ("exit_kind",  lambda r:r["exit_kind"]),
+                ("direction",  lambda r:r["direction_mode"]),
+                ("trend_filter", lambda r:f"trend={r['trend_filter']}"),
+                ("adx_filter",   lambda r:f"adx={r['adx_filter']}")]:
+    save(os.path.join(OUT_DIR, f"full_horizon_group_by_{lbl}.csv"),
          group_summary(all_rows, fn), f"group_{lbl}")
+
+# flagged configs
+flagged = [r for r in all_rows if r["flags"]]
+save(os.path.join(OUT_DIR,"full_horizon_flagged.csv"), flagged, "flagged")
 
 
 # ============================================================ TOP 10 EQUITY + TRADE CSV + PNG
-sect("TOP 10 EQUITY CURVES + TRADE CSVS")
-topk_sorted = sorted(topk.items, key=lambda x: -x[0])[:KEEP_TOP_K_TRADES]
+sect("TOP 10 BY NET PROFIT — equity reconstruction + trade CSVs")
 try:
     import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
     has_plt = True
-except Exception as e:
-    plt = None; has_plt = False
-    tprint(f"  matplotlib unavailable: {e}")
+except Exception as e: plt=None; has_plt=False; tprint(f"matplotlib unavailable: {e}")
 
-for rank, (net_profit, key, arrays) in enumerate(topk_sorted, 1):
+topk_sorted = sorted(topk_net.items, key=lambda x:-x[0])[:KEEP_TOP_K]
+for rank_i, (score, key, arrays) in enumerate(topk_sorted, 1):
     entries, sides, outcome, net_dol, exit_off = arrays
-    res_mask = outcome != -1
-    if not res_mask.any(): continue
-    eq_arr = STARTING_CAPITAL + np.cumsum(net_dol[res_mask])
-    peak_a = np.maximum.accumulate(eq_arr); dd_a = peak_a - eq_arr
-    times = pd.to_datetime(timestamps[entries[res_mask]]) if HAS_TS else np.arange(int(res_mask.sum()))
+    res = outcome != -1
+    if not res.any(): continue
+    eq = STARTING_CAPITAL + np.cumsum(net_dol[res])
+    peak = np.maximum.accumulate(eq); dd = peak - eq
 
     # trade CSV
-    trade_rows = []
-    cum_eq = STARTING_CAPITAL; peak_eq = cum_eq
-    for tid, idx in enumerate(np.where(res_mask)[0], 1):
-        ei = int(entries[idx]); sv = int(sides[idx]); outc = int(outcome[idx])
-        cum_eq += float(net_dol[idx])
-        if cum_eq > peak_eq: peak_eq = cum_eq
-        dd_pct_t = (peak_eq - cum_eq) / peak_eq * 100 if peak_eq > 0 else 0
-        trade_rows.append({
-            "trade_id": tid, "strategy_key": key,
-            "direction": "long" if sv == 1 else "short",
-            "entry_time": str(timestamps[ei]),
-            "entry_price": float(cl[ei]),
-            "outcome": "win" if outc == 1 else "loss" if outc == 0 else "unresolved",
-            "hold_bars": int(exit_off[idx]),
-            "net_pnl_dol": float(net_dol[idx]),
-            "equity_after_trade": cum_eq,
-            "drawdown_pct_after_trade": dd_pct_t,
-        })
-    save(os.path.join(OUT_DIR, f"trades_top{rank}_{key[:40]}.csv"),
-         trade_rows, f"trades_top{rank}")
+    rows_t = []
+    cum=STARTING_CAPITAL; pk=cum
+    for tid, idx in enumerate(np.where(res)[0], 1):
+        ei=int(entries[idx]); sv=int(sides[idx]); o_=int(outcome[idx])
+        cum += float(net_dol[idx])
+        if cum > pk: pk = cum
+        dd_pct = (pk-cum)/pk*100 if pk > 0 else 0
+        rows_t.append({"trade_id":tid,"strategy_key":key,
+                       "direction":"long" if sv==1 else "short",
+                       "entry_time":str(timestamps[ei]),
+                       "entry_price":float(cl[ei]),
+                       "outcome":"win" if o_==1 else "loss",
+                       "hold_bars":int(exit_off[idx]),
+                       "net_pnl_dol":float(net_dol[idx]),
+                       "equity_after":cum,
+                       "drawdown_pct_after":dd_pct})
+    save(os.path.join(OUT_DIR, f"trades_top{rank_i}_{key[:40].replace('|','_')}.csv"),
+         rows_t, f"trades_top{rank_i}")
 
     # PNG
     if has_plt:
+        times = pd.to_datetime(timestamps[entries[res]]) if HAS_TS else np.arange(int(res.sum()))
         fig, ax = plt.subplots(2,1,figsize=(11,6),gridspec_kw={"height_ratios":[3,1]})
-        ax[0].plot(times, eq_arr, lw=1.2)
-        ax[0].set_title(f"#{rank}  {key}\nfinal=${eq_arr[-1]:,.0f}  trades={len(eq_arr):,}  net=${net_profit:+,.1f}")
+        ax[0].plot(times, eq, lw=1.2)
+        ax[0].set_title(f"#{rank_i}  {key}\nfinal=${eq[-1]:,.0f}  trades={len(eq):,}  net=${score:+,.1f}")
         ax[0].set_ylabel("Equity $")
-        ax[1].fill_between(times, dd_a, 0, color="crimson", alpha=0.4)
+        ax[1].fill_between(times, dd, 0, color="crimson", alpha=0.4)
         ax[1].set_ylabel("DD $")
         plt.tight_layout()
-        plt.savefig(os.path.join(OUT_DIR, f"equity_top{rank}_{key[:40]}.png"), dpi=110); plt.close()
-        tprint(f"  [png] top{rank}: equity saved  key={key}")
+        plt.savefig(os.path.join(OUT_DIR, f"equity_top{rank_i}_{key[:40].replace('|','_')}.png"), dpi=110)
+        plt.close()
+        tprint(f"  [png] top{rank_i} saved")
 
-
-# ============================================================ YEARLY (top 10)
-sect("YEARLY BREAKDOWN — TOP 10 BY NET PROFIT")
-if HAS_TS:
-    for rank, (net_profit, key, arrays) in enumerate(topk_sorted, 1):
-        entries, sides, outcome, net_dol, exit_off = arrays
-        res_mask = outcome != -1
-        if not res_mask.any(): continue
-        years = pd.to_datetime(timestamps[entries[res_mask]]).year
-        nd = net_dol[res_mask]
-        by_y = defaultdict(lambda: {"n":0,"wins":0,"net":0.0})
-        for y, d in zip(years, nd):
-            g = by_y[int(y)]
-            g["n"] += 1
-            if d > 0: g["wins"] += 1
-            g["net"] += float(d)
-        print(f"\n  #{rank}  {key}")
-        print(f"  {'year':>5} {'trades':>7} {'WR%':>6} {'net$':>10}")
-        print("  "+"-"*40)
-        for y in sorted(by_y):
-            g = by_y[y]
-            print(f"  {y:>5} {g['n']:>7,} {100*g['wins']/g['n']:>5.2f}% {g['net']:>+10,.1f}")
-else:
-    print("  (no timestamps available)")
-
-tprint("DONE 🚀")
+tprint(f"sweep aborted early: {aborted}")
+tprint("DONE 🔭")
