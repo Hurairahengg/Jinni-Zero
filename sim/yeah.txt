@@ -1,0 +1,2 @@
+ MA  Period  AboveSamples  AboveBullPct  AboveBearPct  BelowSamples  BelowBullPct  BelowBearPct
+HMA      21        157499         88.52         11.48        156756         11.95         88.05

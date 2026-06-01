@@ -1,0 +1,325 @@
+====================================================================================================
+ 1. TOP 50 TRAIN (with OOS)
+====================================================================================================
+  #  key                                                        |    trd     WR%   edge   PF.p    PF$   EV.p       net$    DD%    Sh$
+-------------------------------------------------------------------------------------------------------------------------------------
+  1  EMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 16,178  29.48%  +5.78  1.364  1.346 +3.124  +43,519.4 105.16% 15.459
+                                                                | O  6,395  27.74%  +4.16  1.249  1.244 +2.194  +12,431.3  83.28%  7.127  [OKAY]
+  2  EMA200 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 15,905  29.43%  +5.75  1.363  1.344 +3.109  +42,621.4 111.29% 15.267
+                                                                | O  6,250  27.60%  +3.97  1.240  1.232 +2.118  +11,572.4 102.73%  6.731  [OKAY]
+  3  EMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 16,639  29.32%  +5.66  1.357  1.339 +3.066  +43,929.2 124.23% 15.386
+                                                                | O  6,636  27.67%  +4.04  1.245  1.236 +2.159  +12,498.3  78.53%  7.053  [OKAY]
+  4  EMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 17,350  29.16%  +5.54  1.344  1.331 +2.965  +44,914.7 122.63% 15.410
+                                                                | O  7,013  27.81%  +4.13  1.251  1.242 +2.212  +13,505.4  69.94%  7.412  [OKAY]
+  5  EMA200 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | T 17,656  29.09%  +5.38  1.337  1.320 +2.908  +44,138.2 137.51% 15.086
+                                                                | O  6,981  27.49%  +3.86  1.233  1.225 +2.063  +12,589.3  96.25%  6.942  [OKAY]
+  6  EMA144 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | T 18,228  29.07%  +5.36  1.336  1.319 +2.900  +45,496.1 103.13% 15.300
+                                                                | O  7,267  27.59%  +3.89  1.239  1.227 +2.112  +13,156.4  82.67%  7.124  [OKAY]
+  7  EMA200 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | T 18,513  29.04%  +5.30  1.332  1.315 +2.876  +45,615.8 131.65% 15.249
+                                                                | O  7,354  27.45%  +3.79  1.231  1.221 +2.046  +12,981.3  94.00%  6.990  [OKAY]
+  8  EMA144 CONFI  5 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 30,383  28.81%  +5.22  1.323  1.311 +2.793  +74,198.9 112.85% 19.284
+                                                                | O 12,477  26.62%  +2.84  1.177  1.163 +1.592  +16,448.2  60.15%  6.895  [OKAY]
+  9  EMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 18,263  28.87%  +5.22  1.324  1.311 +2.802  +44,498.9 117.88% 14.944
+                                                                | O  7,459  27.93%  +4.25  1.259  1.249 +2.281  +14,745.1  73.43%  7.838  [OKAY]
+ 10  EMA 89 CONFI  5 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 31,609  28.78%  +5.19  1.324  1.309 +2.794  +76,783.4 115.28% 19.563
+                                                                | O 13,014  26.54%  +2.73  1.172  1.156 +1.543  +16,436.8  60.40%  6.762  [OKAY]
+ 11  EMA200 CONFI  5 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 29,658  28.74%  +5.17  1.318  1.308 +2.753  +71,748.8 153.54% 18.878
+                                                                | O 12,180  26.60%  +2.81  1.176  1.161 +1.583  +15,841.0  61.13%  6.725  [OKAY]
+ 12  EMA144 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | T 19,212  28.88%  +5.16  1.322  1.306 +2.793  +46,147.2 129.63% 15.155
+                                                                | O  7,682  27.32%  +3.63  1.223  1.211 +1.975  +12,974.1  93.82%  6.854  [OKAY]
+ 13  EMA200 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | T 19,336  28.90%  +5.16  1.323  1.306 +2.799  +46,379.1 122.58% 15.194
+                                                                | O  7,699  27.41%  +3.73  1.228  1.217 +2.021  +13,385.6  94.61%  7.051  [OKAY]
+ 14  EMA 55 CONFI  5 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 33,232  28.67%  +5.11  1.316  1.304 +2.735  +79,563.2 121.13% 19.776
+                                                                | O 13,745  26.67%  +2.85  1.178  1.163 +1.598  +18,143.4  50.39%  7.252  [OKAY]
+ 15  EMA 89 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | T 19,239  28.81%  +5.11  1.319  1.303 +2.769  +45,740.1 133.35% 15.011
+                                                                | O  7,762  27.51%  +3.81  1.235  1.222 +2.077  +13,775.3  91.59%  7.224  [OKAY]
+ 16  EMA144 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | T 20,132  28.75%  +5.03  1.314  1.298 +2.725  +47,081.1 134.67% 15.132
+                                                                | O  8,074  27.32%  +3.62  1.222  1.210 +1.969  +13,601.5 100.78%  7.012  [OKAY]
+ 17  EMA200 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | T 15,905  33.67%  +5.53  1.329  1.296 +2.641  +34,478.3  86.51% 14.187
+                                                                | O  6,250  31.74%  +3.69  1.210  1.193 +1.748   +9,058.3 116.06%  6.024  [OKAY]
+ 18  EMA144 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | T 16,178  33.68%  +5.53  1.328  1.296 +2.636  +35,056.8  78.06% 14.305
+                                                                | O  6,395  31.90%  +3.88  1.220  1.203 +1.822   +9,771.2  96.60%  6.409  [OKAY]
+ 19  HMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 19,345  28.76%  +4.98  1.314  1.294 +2.726  +44,670.8 142.42% 14.675
+                                                                | O  7,898  28.54%  +4.92  1.307  1.292 +2.661  +18,165.9  68.92%  9.296  [OKAY]
+ 20  EMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 19,505  28.66%  +4.95  1.309  1.293 +2.683  +44,949.8 106.99% 14.678
+                                                                | O  8,005  28.03%  +4.32  1.268  1.253 +2.355  +16,065.5  78.57%  8.246  [OKAY]
+ 21  HMA200 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 16,327  28.58%  +4.93  1.308  1.292 +2.674  +37,579.9 148.58% 13.388
+                                                                | O  6,699  27.63%  +4.11  1.242  1.242 +2.136  +12,913.8  81.93%  7.223  [OKAY]
+ 22  EMA200 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | T 15,905  23.20%  +4.24  1.445  1.291 +2.836  +40,480.6 119.29% 12.674
+                                                                | O  6,250  21.84%  +2.88  1.337  1.194 +2.183  +10,806.2 175.50%  5.514  [OKAY]
+ 23  EMA 89 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | T 20,416  28.65%  +4.92  1.308  1.291 +2.680  +46,738.3 119.43% 14.933
+                                                                | O  8,274  27.56%  +3.80  1.237  1.221 +2.097  +14,600.7  98.63%  7.429  [OKAY]
+ 24  EMA144 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | T 16,178  23.19%  +4.23  1.444  1.291 +2.832  +41,095.2 121.41% 12.759
+                                                                | O  6,395  22.03%  +3.07  1.352  1.208 +2.276  +11,796.9 140.53%  5.932  [OKAY]
+ 25  HMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 20,993  28.70%  +4.92  1.310  1.290 +2.698  +47,915.7 137.36% 15.127
+                                                                | O  8,582  28.32%  +4.54  1.294  1.267 +2.556  +18,102.9  78.63%  8.964  [OKAY]
+ 26  EMA 89 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | T 16,639  33.52%  +5.42  1.322  1.290 +2.586  +35,419.4  97.50% 14.244
+                                                                | O  6,636  31.78%  +3.71  1.214  1.194 +1.775   +9,677.7  92.42%  6.248  [OKAY]
+ 27  EMA 89 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | T 16,639  23.17%  +4.22  1.443  1.289 +2.824  +42,091.4 132.07% 12.889
+                                                                | O  6,636  21.88%  +2.92  1.340  1.197 +2.203  +11,635.5 134.08%  5.758  [OKAY]
+ 28  EMA 55 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | T 20,533  28.62%  +4.88  1.305  1.288 +2.656  +46,528.8 115.11% 14.835
+                                                                | O  8,371  27.58%  +3.85  1.240  1.224 +2.118  +14,979.2  99.37%  7.568  [OKAY]
+ 29  HMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 22,863  28.68%  +4.87  1.310  1.287 +2.694  +51,559.9 102.93% 15.616
+                                                                | O  9,315  28.03%  +4.30  1.275  1.252 +2.399  +18,635.3  96.82%  8.877  [OKAY]
+ 30  EMA 55 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | T 17,350  23.13%  +4.17  1.439  1.286 +2.802  +43,423.8 118.63% 13.031
+                                                                | O  7,013  21.94%  +2.99  1.345  1.202 +2.234  +12,567.1 122.53%  6.043  [OKAY]
+ 31  EMA200 CONFI  3 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 33,160  28.47%  +4.84  1.300  1.286 +2.609  +74,885.5 151.69% 18.737
+                                                                | O 13,627  26.39%  +2.54  1.163  1.145 +1.469  +16,032.5  57.05%  6.468  [OKAY]
+ 32  EMA 89 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | T 21,479  28.60%  +4.84  1.303  1.285 +2.640  +48,262.5 115.64% 15.063
+                                                                | O  8,727  27.58%  +3.79  1.240  1.220 +2.116  +15,313.0 101.97%  7.595  [OKAY]
+ 33  EMA 34 CONFI  5 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 35,211  28.36%  +4.78  1.295  1.283 +2.561  +78,860.9 135.88% 19.119
+                                                                | O 14,635  26.68%  +2.80  1.179  1.160 +1.606  +18,948.1  51.55%  7.355  [OKAY]
+ 34  EMA 55 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | T 17,350  33.36%  +5.29  1.309  1.283 +2.498  +36,055.8 104.56% 14.205
+                                                                | O  7,013  31.95%  +3.85  1.220  1.201 +1.830  +10,605.2  92.74%  6.656  [OKAY]
+ 35  HMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 16,838  28.47%  +4.79  1.299  1.282 +2.603  +37,534.9 167.71% 13.205
+                                                                | O  6,921  28.32%  +4.71  1.285  1.278 +2.496  +15,223.2  64.82%  8.340  [OKAY]
+ 36  HMA200 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | T 19,274  28.56%  +4.79  1.304  1.282 +2.642  +42,847.9 140.89% 14.123
+                                                                | O  7,944  27.51%  +3.88  1.238  1.226 +2.098  +14,378.3  97.60%  7.429  [OKAY]
+ 37  HMA200 CONFI  5 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 31,823  28.28%  +4.75  1.291  1.281 +2.533  +70,866.6 184.54% 18.058
+                                                                | O 13,219  26.70%  +2.87  1.180  1.164 +1.618  +17,559.4  59.87%  7.160  [OKAY]
+ 38  EMA144 CONFI  3 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 34,512  28.40%  +4.74  1.295  1.280 +2.571  +76,346.4 102.70% 18.751
+                                                                | O 14,176  26.42%  +2.53  1.164  1.144 +1.477  +16,554.5  53.41%  6.557  [OKAY]
+ 39  EMA200 CONFI  2 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 34,894  28.41%  +4.73  1.295  1.279 +2.572  +76,960.5 126.88% 18.817
+                                                                | O 14,352  26.37%  +2.48  1.161  1.141 +1.455  +16,422.6  54.85%  6.469  [OKAY]
+ 40  HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | T 17,943  28.46%  +4.72  1.296  1.278 +2.581  +39,358.8 150.44% 13.450
+                                                                | O  7,400  28.62%  +5.00  1.309  1.297 +2.685  +17,293.6  50.64%  9.134  [OKAY]
+ 41  EMA 89 CONFI  5 N5 ALL_FA shor TP40 SETUP_F     indepe     | T 14,970  28.17%  +4.67  1.287  1.277 +2.492  +32,854.3 133.29% 12.200
+                                                                | O  6,378  25.37%  +1.35  1.098  1.075 +0.901   +3,938.5 113.79%  2.370  [FAIL]
+ 42  EMA 55 CONFI  5 N5 ALL_FA shor TP40 SETUP_F     indepe     | T 15,882  28.14%  +4.64  1.286  1.275 +2.484  +34,648.5 141.37% 12.495
+                                                                | O  6,732  25.49%  +1.50  1.105  1.084 +0.958   +4,637.9 104.30%  2.708  [FAIL]
+ 43  HMA 21 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | T 24,145  28.54%  +4.68  1.300  1.275 +2.613  +52,258.4 118.48% 15.457
+                                                                | O  9,854  28.01%  +4.22  1.274  1.247 +2.391  +19,294.0  94.19%  8.961  [OKAY]
+ 44  EMA200 CONFI  3 N5 ALL_FA long TP32 SETUP_F     indepe     | T 17,656  33.31%  +5.12  1.304  1.272 +2.462  +35,384.2 100.55% 13.884
+                                                                | O  6,981  31.61%  +3.56  1.203  1.186 +1.694   +9,777.5 116.57%  6.162  [OKAY]
+ 45  EMA 55 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | T 21,896  28.43%  +4.64  1.292  1.272 +2.549  +47,050.9 115.84% 14.590
+                                                                | O  8,917  27.66%  +3.87  1.246  1.225 +2.165  +16,008.4  97.44%  7.843  [OKAY]
+ 46  EMA144 CONFI  5 N5 ALL_FA shor TP40 SETUP_F     indepe     | T 14,205  28.05%  +4.59  1.277  1.272 +2.417  +30,679.4 135.93% 11.698
+                                                                | O  6,082  25.45%  +1.44  1.105  1.080 +0.958   +4,016.9 115.01%  2.471  [FAIL]
+ 47  HMA200 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | T 20,657  28.44%  +4.63  1.296  1.272 +2.577  +44,332.3 123.25% 14.160
+                                                                | O  8,490  27.68%  +3.98  1.250  1.232 +2.197  +15,736.3  92.77%  7.870  [OKAY]
+ 48  EMA 21 CONFI  5 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 37,737  28.25%  +4.61  1.287  1.271 +2.498  +81,110.3  93.68% 19.068
+                                                                | O 15,671  26.80%  +2.88  1.188  1.164 +1.686  +20,790.1  60.45%  7.801  [OKAY]
+ 49  HMA144 CONFI  5 N5 ALL_FA comb TP40 SETUP_F     indepe     | T 32,837  28.17%  +4.59  1.283  1.271 +2.469  +70,566.0 171.76% 17.756
+                                                                | O 13,714  27.13%  +3.26  1.206  1.187 +1.838  +20,649.7  49.87%  8.232  [OKAY]
+ 50  EMA144 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | T 20,881  28.60%  +4.63  1.299  1.271 +2.613  +44,489.3 102.02% 14.205
+                                                                | O  8,372  27.01%  +3.07  1.198  1.176 +1.773  +11,826.2  67.43%  6.067  [OKAY]
+
+====================================================================================================
+ 2. TOP 30 OOS PASSES
+====================================================================================================
+  #  key                                                        |    trd     WR%   edge   PF.p    PF$   EV.p       net$    DD%    Sh$
+-------------------------------------------------------------------------------------------------------------------------------------
+  1  HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,400  28.62%  +5.00  1.309  1.297 +2.685  +17,293.6  50.64%  9.134  [OKAY]
+  2  HMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,898  28.54%  +4.92  1.307  1.292 +2.661  +18,165.9  68.92%  9.296  [OKAY]
+  3  HMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,921  28.32%  +4.71  1.285  1.278 +2.496  +15,223.2  64.82%  8.340  [OKAY]
+  4  HMA 55 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  7,898  22.90%  +3.95  1.421  1.270 +2.694  +18,700.2 119.83%  8.346  [OKAY]
+  5  HMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,582  28.32%  +4.54  1.294  1.267 +2.556  +18,102.9  78.63%  8.964  [OKAY]
+  6  HMA 89 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  7,400  22.85%  +3.89  1.417  1.266 +2.669  +17,285.0  97.09%  7.976  [OKAY]
+  7  HMA144 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  6,921  22.79%  +3.83  1.411  1.261 +2.637  +15,893.6 101.06%  7.591  [OKAY]
+  8  HMA 89 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,057  28.14%  +4.41  1.278  1.259 +2.434  +18,558.2  70.79%  8.953  [OKAY]
+  9  HMA 55 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  9,099  28.21%  +4.39  1.287  1.257 +2.495  +18,513.1  53.47%  8.934  [OKAY]
+ 10  HMA144 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,291  27.98%  +4.34  1.268  1.255 +2.351  +16,776.5  81.60%  8.445  [OKAY]
+ 11  EMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,005  28.03%  +4.32  1.268  1.253 +2.355  +16,065.5  78.57%  8.246  [OKAY]
+ 12  HMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,315  28.03%  +4.30  1.275  1.252 +2.399  +18,635.3  96.82%  8.877  [OKAY]
+ 13  HMA 89 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | O  7,400  32.77%  +4.72  1.274  1.250 +2.237  +13,730.0  66.63%  8.316  [OKAY]
+ 14  HMA144 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,890  27.94%  +4.25  1.265  1.249 +2.324  +17,609.7  87.71%  8.579  [OKAY]
+ 15  EMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,459  27.93%  +4.25  1.259  1.249 +2.281  +14,745.1  73.43%  7.838  [OKAY]
+ 16  HMA 34 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  9,464  28.13%  +4.26  1.283  1.248 +2.461  +18,639.3  67.52%  8.843  [OKAY]
+ 17  HMA 21 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  9,854  28.01%  +4.22  1.274  1.247 +2.391  +19,294.0  94.19%  8.961  [OKAY]
+ 18  EMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,395  27.74%  +4.16  1.249  1.244 +2.194  +12,431.3  83.28%  7.127  [OKAY]
+ 19  HMA 89 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,636  27.96%  +4.17  1.267  1.243 +2.338  +18,638.0  81.11%  8.756  [OKAY]
+ 20  HMA 55 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | O  7,898  32.62%  +4.59  1.268  1.243 +2.184  +14,266.5  85.08%  8.368  [OKAY]
+ 21  HMA 89 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  8,813  28.03%  +4.17  1.270  1.243 +2.362  +16,988.3  33.91%  8.359  [OKAY]
+ 22  EMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,013  27.81%  +4.13  1.251  1.242 +2.212  +13,505.4  69.94%  7.412  [OKAY]
+ 23  HMA144 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,379  27.90%  +4.14  1.263  1.242 +2.305  +18,038.9  85.38%  8.585  [OKAY]
+ 24  HMA200 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,699  27.63%  +4.11  1.242  1.242 +2.136  +12,913.8  81.93%  7.223  [OKAY]
+ 25  HMA 55 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,771  27.95%  +4.14  1.268  1.241 +2.343  +18,742.2  84.77%  8.751  [OKAY]
+ 26  HMA 34 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  8,582  22.48%  +3.52  1.387  1.239 +2.489  +18,119.8 126.81%  7.809  [OKAY]
+ 27  HMA 89 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | O 10,050  27.88%  +4.07  1.263  1.237 +2.305  +18,951.8  82.72%  8.734  [OKAY]
+ 28  HMA200 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,955  27.79%  +4.06  1.257  1.237 +2.254  +16,903.9  93.28%  8.234  [OKAY]
+ 29  HMA 21 CONFI  5 N3 ALL_FA long TP40 SETUP_F     indepe     | O 10,638  27.96%  +4.08  1.271  1.237 +2.368  +20,036.2  79.77%  8.995  [OKAY]
+ 30  HMA 21 CONFI  5 N3 FAVORA long TP40 SETUP_F     indepe     | O 10,638  27.96%  +4.08  1.271  1.237 +2.368  +20,036.2  79.77%  8.995  [OKAY]
+
+====================================================================================================
+ TOP 20 EMA (OOS)
+====================================================================================================
+  #  key                                                        |    trd     WR%   edge   PF.p    PF$   EV.p       net$    DD%    Sh$
+-------------------------------------------------------------------------------------------------------------------------------------
+  1  EMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,005  28.03%  +4.32  1.268  1.253 +2.355  +16,065.5  78.57%  8.246
+  2  EMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,459  27.93%  +4.25  1.259  1.249 +2.281  +14,745.1  73.43%  7.838
+  3  EMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,395  27.74%  +4.16  1.249  1.244 +2.194  +12,431.3  83.28%  7.127
+  4  EMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,013  27.81%  +4.13  1.251  1.242 +2.212  +13,505.4  69.94%  7.412
+  5  EMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,636  27.67%  +4.04  1.245  1.236 +2.159  +12,498.3  78.53%  7.053
+  6  EMA 34 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,019  27.77%  +3.99  1.254  1.233 +2.233  +16,712.6  86.90%  8.130
+  7  EMA 21 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,703  27.84%  +4.00  1.260  1.232 +2.282  +17,958.8  84.20%  8.435
+  8  EMA200 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,250  27.60%  +3.97  1.240  1.232 +2.118  +11,572.4 102.73%  6.731
+  9  EMA 21 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  8,005  22.35%  +3.39  1.377  1.230 +2.427  +16,283.1 127.77%  7.281
+ 10  EMA 34 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,589  27.76%  +3.95  1.254  1.229 +2.234  +17,532.7  85.68%  8.285
+ 11  EMA 55 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,393  27.69%  +3.90  1.249  1.227 +2.191  +16,996.4  92.35%  8.112
+ 12  EMA144 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,267  27.59%  +3.89  1.239  1.227 +2.112  +13,156.4  82.67%  7.124
+ 13  EMA200 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,981  27.49%  +3.86  1.233  1.225 +2.063  +12,589.3  96.25%  6.942
+ 14  EMA 55 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,917  27.66%  +3.87  1.246  1.225 +2.165  +16,008.4  97.44%  7.843
+ 15  EMA 55 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,371  27.58%  +3.85  1.240  1.224 +2.118  +14,979.2  99.37%  7.568
+ 16  EMA 21 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  9,217  27.74%  +3.85  1.248  1.223 +2.189  +16,398.7  57.94%  7.928
+ 17  EMA 34 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  7,459  22.24%  +3.28  1.368  1.223 +2.376  +14,693.9 125.90%  6.818
+ 18  EMA 89 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,762  27.51%  +3.81  1.235  1.222 +2.077  +13,775.3  91.59%  7.224
+ 19  EMA 34 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | O 10,000  27.67%  +3.83  1.250  1.222 +2.195  +17,709.3  89.46%  8.211
+ 20  EMA 89 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,274  27.56%  +3.80  1.237  1.221 +2.097  +14,600.7  98.63%  7.429
+
+====================================================================================================
+ TOP 20 HMA (OOS)
+====================================================================================================
+  #  key                                                        |    trd     WR%   edge   PF.p    PF$   EV.p       net$    DD%    Sh$
+-------------------------------------------------------------------------------------------------------------------------------------
+  1  HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,400  28.62%  +5.00  1.309  1.297 +2.685  +17,293.6  50.64%  9.134
+  2  HMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  7,898  28.54%  +4.92  1.307  1.292 +2.661  +18,165.9  68.92%  9.296
+  3  HMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,921  28.32%  +4.71  1.285  1.278 +2.496  +15,223.2  64.82%  8.340
+  4  HMA 55 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  7,898  22.90%  +3.95  1.421  1.270 +2.694  +18,700.2 119.83%  8.346
+  5  HMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,582  28.32%  +4.54  1.294  1.267 +2.556  +18,102.9  78.63%  8.964
+  6  HMA 89 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  7,400  22.85%  +3.89  1.417  1.266 +2.669  +17,285.0  97.09%  7.976
+  7  HMA144 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | O  6,921  22.79%  +3.83  1.411  1.261 +2.637  +15,893.6 101.06%  7.591
+  8  HMA 89 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,057  28.14%  +4.41  1.278  1.259 +2.434  +18,558.2  70.79%  8.953
+  9  HMA 55 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  9,099  28.21%  +4.39  1.287  1.257 +2.495  +18,513.1  53.47%  8.934
+ 10  HMA144 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,291  27.98%  +4.34  1.268  1.255 +2.351  +16,776.5  81.60%  8.445
+ 11  HMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,315  28.03%  +4.30  1.275  1.252 +2.399  +18,635.3  96.82%  8.877
+ 12  HMA 89 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | O  7,400  32.77%  +4.72  1.274  1.250 +2.237  +13,730.0  66.63%  8.316
+ 13  HMA144 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | O  8,890  27.94%  +4.25  1.265  1.249 +2.324  +17,609.7  87.71%  8.579
+ 14  HMA 34 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  9,464  28.13%  +4.26  1.283  1.248 +2.461  +18,639.3  67.52%  8.843
+ 15  HMA 21 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  9,854  28.01%  +4.22  1.274  1.247 +2.391  +19,294.0  94.19%  8.961
+ 16  HMA 89 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,636  27.96%  +4.17  1.267  1.243 +2.338  +18,638.0  81.11%  8.756
+ 17  HMA 55 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | O  7,898  32.62%  +4.59  1.268  1.243 +2.184  +14,266.5  85.08%  8.368
+ 18  HMA 89 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | O  8,813  28.03%  +4.17  1.270  1.243 +2.362  +16,988.3  33.91%  8.359
+ 19  HMA144 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe     | O  9,379  27.90%  +4.14  1.263  1.242 +2.305  +18,038.9  85.38%  8.585
+ 20  HMA200 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | O  6,699  27.63%  +4.11  1.242  1.242 +2.136  +12,913.8  81.93%  7.223
+
+====================================================================================================
+ BEST PER MA TYPE+PERIOD (OOS)
+====================================================================================================
+  #  key                                                        |    trd     WR%   edge   PF.p    PF$   EV.p       net$    DD%    Sh$
+-------------------------------------------------------------------------------------------------------------------------------------
+  ('EMA', 21)                 EMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  8,005  28.03%  +4.32  1.268  1.253 +2.355  +16,065.5  78.57%  8.246
+  ('EMA', 34)                 EMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  7,459  27.93%  +4.25  1.259  1.249 +2.281  +14,745.1  73.43%  7.838
+  ('EMA', 55)                 EMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  7,013  27.81%  +4.13  1.251  1.242 +2.212  +13,505.4  69.94%  7.412
+  ('EMA', 89)                 EMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  6,636  27.67%  +4.04  1.245  1.236 +2.159  +12,498.3  78.53%  7.053
+  ('EMA', 144)                EMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  6,395  27.74%  +4.16  1.249  1.244 +2.194  +12,431.3  83.28%  7.127
+  ('EMA', 200)                EMA200 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  6,250  27.60%  +3.97  1.240  1.232 +2.118  +11,572.4 102.73%  6.731
+  ('HMA', 21)                 HMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  9,315  28.03%  +4.30  1.275  1.252 +2.399  +18,635.3  96.82%  8.877
+  ('HMA', 34)                 HMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  8,582  28.32%  +4.54  1.294  1.267 +2.556  +18,102.9  78.63%  8.964
+  ('HMA', 55)                 HMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  7,898  28.54%  +4.92  1.307  1.292 +2.661  +18,165.9  68.92%  9.296
+  ('HMA', 89)                 HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  7,400  28.62%  +5.00  1.309  1.297 +2.685  +17,293.6  50.64%  9.134
+  ('HMA', 144)                HMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  6,921  28.32%  +4.71  1.285  1.278 +2.496  +15,223.2  64.82%  8.340
+  ('HMA', 200)                HMA200 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  6,699  27.63%  +4.11  1.242  1.242 +2.136  +12,913.8  81.93%  7.223
+
+====================================================================================================
+ BEST PER SETUP RULE (OOS)
+====================================================================================================
+  #  key                                                        |    trd     WR%   edge   PF.p    PF$   EV.p       net$    DD%    Sh$
+-------------------------------------------------------------------------------------------------------------------------------------
+  ALL_FAVORABLE               HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  7,400  28.62%  +5.00  1.309  1.297 +2.685  +17,293.6  50.64%  9.134
+  FAVORABLE_60                HMA 21 CONFI  5 N2 FAVORA long TP40 SETUP_F     indepe | O 11,736  27.81%  +3.80  1.261  1.219 +2.287  +20,462.9  66.91%  8.808
+  FAVORABLE_75                HMA 21 CONFI  5 N3 FAVORA long TP40 SETUP_F     indepe | O 10,638  27.96%  +4.08  1.271  1.237 +2.368  +20,036.2  79.77%  8.995
+  NET_FAVORABLE               HMA 21 CONFI  5 N2 NET_FA long TP40 SETUP_F     indepe | O 11,736  27.81%  +3.80  1.261  1.219 +2.287  +20,462.9  66.91%  8.808
+
+====================================================================================================
+ BEST PER REGIME (OOS)
+====================================================================================================
+  #  key                                                        |    trd     WR%   edge   PF.p    PF$   EV.p       net$    DD%    Sh$
+-------------------------------------------------------------------------------------------------------------------------------------
+  BREAK_EVENT                 EMA 89 BREAK    N5 ALL_FA long TP40 SETUP_F     indepe | O    791  26.68%  +2.61  1.178  1.148 +1.599     +944.5  21.46%  1.600
+  CONFIRMED_SIDE_STATE        HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  7,400  28.62%  +5.00  1.309  1.297 +2.685  +17,293.6  50.64%  9.134
+  SIDE_STATE                  HMA144 SIDE_    N5 ALL_FA long TP40 SETUP_F     indepe | O  9,379  27.90%  +4.14  1.263  1.242 +2.305  +18,038.9  85.38%  8.585
+
+====================================================================================================
+ BEST PER SL MODEL (OOS)
+====================================================================================================
+  #  key                                                        |    trd     WR%   edge   PF.p    PF$   EV.p       net$    DD%    Sh$
+-------------------------------------------------------------------------------------------------------------------------------------
+  FIXED_SL                    HMA 55 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe | O  7,898  22.90%  +3.95  1.421  1.270 +2.694  +18,700.2 119.83%  8.346
+  SETUP_FINAL_BAR_EXTREME     HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe | O  7,400  28.62%  +5.00  1.309  1.297 +2.685  +17,293.6  50.64%  9.134
+  SETUP_WINDOW_EXTREME        EMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_W     indepe | O  6,395  57.15%  +2.58  1.143  1.111 +2.838   +3,102.3  34.00%  4.165
+
+====================================================================================================
+ LONG/SHORT — TOP 10 OOS
+====================================================================================================
+  1  HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | L 7,400  28.6% PF 1.297 $+17,293.6 | S     0   0.0% PF 0.000 $     +0.0
+  2  HMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | L 7,898  28.5% PF 1.292 $+18,165.9 | S     0   0.0% PF 0.000 $     +0.0
+  3  HMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | L 6,921  28.3% PF 1.278 $+15,223.2 | S     0   0.0% PF 0.000 $     +0.0
+  4  HMA 55 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | L 7,898  22.9% PF 1.270 $+18,700.2 | S     0   0.0% PF 0.000 $     +0.0
+  5  HMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | L 8,582  28.3% PF 1.267 $+18,102.9 | S     0   0.0% PF 0.000 $     +0.0
+  6  HMA 89 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | L 7,400  22.9% PF 1.266 $+17,285.0 | S     0   0.0% PF 0.000 $     +0.0
+  7  HMA144 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | L 6,921  22.8% PF 1.261 $+15,893.6 | S     0   0.0% PF 0.000 $     +0.0
+  8  HMA 89 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | L 9,057  28.1% PF 1.259 $+18,558.2 | S     0   0.0% PF 0.000 $     +0.0
+  9  HMA 55 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | L 9,099  28.2% PF 1.257 $+18,513.1 | S     0   0.0% PF 0.000 $     +0.0
+ 10  HMA144 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | L 8,291  28.0% PF 1.255 $+16,776.5 | S     0   0.0% PF 0.000 $     +0.0
+
+====================================================================================================
+ TRAIN vs OOS — TOP 20
+====================================================================================================
+  1  HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.28 O 1.30  WR T 28.5% O 28.6%  net$ T +39,359 O +17,294  DD T150.4% O50.6%
+  2  HMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.29 O 1.29  WR T 28.8% O 28.5%  net$ T +44,671 O +18,166  DD T142.4% O68.9%
+  3  HMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.28 O 1.28  WR T 28.5% O 28.3%  net$ T +37,535 O +15,223  DD T167.7% O64.8%
+  4  HMA 55 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | PF$ T 1.25 O 1.27  WR T 22.6% O 22.9%  net$ T +42,391 O +18,700  DD T127.7% O119.8%
+  5  HMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.29 O 1.27  WR T 28.7% O 28.3%  net$ T +47,916 O +18,103  DD T137.4% O78.6%
+  6  HMA 89 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | PF$ T 1.24 O 1.27  WR T 22.5% O 22.9%  net$ T +37,698 O +17,285  DD T136.6% O97.1%
+  7  HMA144 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | PF$ T 1.24 O 1.26  WR T 22.5% O 22.8%  net$ T +36,168 O +15,894  DD T175.8% O101.1%
+  8  HMA 89 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.27 O 1.26  WR T 28.5% O 28.1%  net$ T +46,401 O +18,558  DD T146.8% O70.8%
+  9  HMA 55 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.26 O 1.26  WR T 28.4% O 28.2%  net$ T +45,857 O +18,513  DD T160.8% O53.5%
+ 10  HMA144 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.27 O 1.25  WR T 28.4% O 28.0%  net$ T +42,935 O +16,776  DD T130.4% O81.6%
+ 11  EMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.29 O 1.25  WR T 28.7% O 28.0%  net$ T +44,950 O +16,065  DD T107.0% O78.6%
+ 12  HMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.29 O 1.25  WR T 28.7% O 28.0%  net$ T +51,560 O +18,635  DD T102.9% O96.8%
+ 13  HMA 89 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | PF$ T 1.23 O 1.25  WR T 32.6% O 32.8%  net$ T +31,068 O +13,730  DD T124.4% O66.6%
+ 14  HMA144 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.27 O 1.25  WR T 28.4% O 27.9%  net$ T +45,805 O +17,610  DD T125.7% O87.7%
+ 15  EMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.31 O 1.25  WR T 28.9% O 27.9%  net$ T +44,499 O +14,745  DD T117.9% O73.4%
+ 16  HMA 34 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.26 O 1.25  WR T 28.3% O 28.1%  net$ T +47,621 O +18,639  DD T150.7% O67.5%
+ 17  HMA 21 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.27 O 1.25  WR T 28.5% O 28.0%  net$ T +52,258 O +19,294  DD T118.5% O94.2%
+ 18  EMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.35 O 1.24  WR T 29.5% O 27.7%  net$ T +43,519 O +12,431  DD T105.2% O83.3%
+ 19  HMA 89 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | PF$ T 1.26 O 1.24  WR T 28.4% O 28.0%  net$ T +48,884 O +18,638  DD T166.7% O81.1%
+ 20  HMA 55 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | PF$ T 1.25 O 1.24  WR T 33.0% O 32.6%  net$ T +36,187 O +14,267  DD T117.8% O85.1%
+
+====================================================================================================
+ STOP-DIST — TOP 20 OOS
+====================================================================================================
+  1  HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.04 med 10.00 p5  8.00 p95 21.00 R avg 3.72 med 4.00
+  2  HMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.05 med 10.00 p5  8.00 p95 21.00 R avg 3.72 med 4.00
+  3  HMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.03 med 10.00 p5  8.00 p95 21.00 R avg 3.72 med 4.00
+  4  HMA 55 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | sd avg  8.00 med  8.00 p5  8.00 p95  8.00 R avg 5.00 med 5.00
+  5  HMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.05 med 10.00 p5  8.00 p95 21.00 R avg 3.71 med 4.00
+  6  HMA 89 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | sd avg  8.00 med  8.00 p5  8.00 p95  8.00 R avg 5.00 med 5.00
+  7  HMA144 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | sd avg  8.00 med  8.00 p5  8.00 p95  8.00 R avg 5.00 med 5.00
+  8  HMA 89 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.08 med 10.00 p5  8.00 p95 21.00 R avg 3.71 med 4.00
+  9  HMA 55 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.08 med 11.00 p5  8.00 p95 21.00 R avg 3.70 med 3.64
+ 10  HMA144 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.05 med 10.00 p5  8.00 p95 21.00 R avg 3.71 med 4.00
+ 11  EMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.05 med 10.00 p5  8.00 p95 21.00 R avg 3.72 med 4.00
+ 12  HMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.05 med 10.00 p5  8.00 p95 21.00 R avg 3.72 med 4.00
+ 13  HMA 89 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | sd avg 12.04 med 10.00 p5  8.00 p95 21.00 R avg 2.97 med 3.20
+ 14  HMA144 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.06 med 10.00 p5  8.00 p95 21.00 R avg 3.71 med 4.00
+ 15  EMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.04 med 10.00 p5  8.00 p95 21.00 R avg 3.72 med 4.00
+ 16  HMA 34 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.08 med 10.00 p5  8.00 p95 21.00 R avg 3.71 med 4.00
+ 17  HMA 21 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.06 med 10.00 p5  8.00 p95 21.00 R avg 3.71 med 4.00
+ 18  EMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.03 med 10.00 p5  8.00 p95 21.00 R avg 3.72 med 4.00
+ 19  HMA 89 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | sd avg 12.09 med 11.00 p5  8.00 p95 21.00 R avg 3.70 med 3.64
+ 20  HMA 55 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | sd avg 12.05 med 10.00 p5  8.00 p95 21.00 R avg 2.97 med 3.20
+
+====================================================================================================
+ MFE/MAE — TOP 20 OOS
+====================================================================================================
+  1  HMA 89 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg103.1 MAE avg 87.8 +1R 93.0% +2R 85.4% +3R 78.6% -1R 87.6%
+  2  HMA 55 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg103.0 MAE avg 87.9 +1R 92.9% +2R 85.2% +3R 78.3% -1R 87.7%
+  3  HMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.8 MAE avg 87.6 +1R 93.1% +2R 85.3% +3R 78.6% -1R 87.7%
+  4  HMA 55 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | MFE avg103.0 MAE avg 87.9 +1R 95.1% +2R 90.1% +3R 85.3% -1R 90.6%
+  5  HMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.8 MAE avg 87.9 +1R 92.9% +2R 85.2% +3R 78.3% -1R 88.0%
+  6  HMA 89 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | MFE avg103.1 MAE avg 87.8 +1R 95.2% +2R 90.3% +3R 85.6% -1R 90.6%
+  7  HMA144 CONFI  5 N5 ALL_FA long TP40 FIXED_S 8.0 indepe     | MFE avg102.8 MAE avg 87.6 +1R 95.3% +2R 90.3% +3R 85.6% -1R 90.6%
+  8  HMA 89 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.3 MAE avg 88.7 +1R 92.7% +2R 84.9% +3R 78.1% -1R 88.2%
+  9  HMA 55 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.5 MAE avg 88.1 +1R 92.9% +2R 85.2% +3R 78.1% -1R 87.9%
+ 10  HMA144 CONFI  3 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.3 MAE avg 88.1 +1R 93.0% +2R 85.2% +3R 78.4% -1R 88.0%
+ 11  EMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.4 MAE avg 88.0 +1R 92.9% +2R 85.1% +3R 78.3% -1R 87.9%
+ 12  HMA 21 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.5 MAE avg 88.0 +1R 92.9% +2R 85.2% +3R 78.3% -1R 88.3%
+ 13  HMA 89 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | (no arrays)
+ 14  HMA144 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.2 MAE avg 88.3 +1R 92.8% +2R 84.9% +3R 78.2% -1R 88.1%
+ 15  EMA 34 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.3 MAE avg 88.2 +1R 92.8% +2R 84.7% +3R 77.8% -1R 87.9%
+ 16  HMA 34 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.8 MAE avg 87.9 +1R 92.9% +2R 85.1% +3R 78.2% -1R 87.9%
+ 17  HMA 21 CONFI  5 N4 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.4 MAE avg 88.0 +1R 92.9% +2R 85.3% +3R 78.3% -1R 88.2%
+ 18  EMA144 CONFI  5 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg104.6 MAE avg 86.7 +1R 92.9% +2R 84.6% +3R 78.1% -1R 88.1%
+ 19  HMA 89 CONFI  2 N5 ALL_FA long TP40 SETUP_F     indepe     | MFE avg102.3 MAE avg 88.5 +1R 92.8% +2R 84.9% +3R 78.1% -1R 88.3%
+ 20  HMA 55 CONFI  5 N5 ALL_FA long TP32 SETUP_F     indepe     | MFE avg103.0 MAE avg 87.9 +1R 92.9% +2R 85.2% +3R 78.3% -1R 87.7%
